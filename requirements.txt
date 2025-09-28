@@ -1,0 +1,5 @@
+# twitter/snscrape_twitter.py 
+snscrape==0.5.0.20230113
+psycopg2-binary==2.9.10
+requests==2.32.3
+beautifulsoup4==4.12.2
