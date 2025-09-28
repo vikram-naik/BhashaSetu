@@ -41,7 +41,7 @@ Schema supports:
 ---
 
 ## 📂 Repository Structure
-
+``` text
 BhashaSetu/
 │
 ├── schema/ # SQL DDL + migrations
@@ -57,7 +57,7 @@ BhashaSetu/
 │ └── ER-diagram.png
 │
 └── README.md # Project overview
-
+```
 
 ---
 
