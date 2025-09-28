@@ -1,0 +1,1 @@
+pg_dump -U bhasha_user -d bhashasetu -F c -f backup_bhashasetu.dump
