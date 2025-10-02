@@ -9,8 +9,7 @@ import random
 import logging
 import json
 from indicnlp.tokenize import sentence_tokenize
-
-from ingestion.webcrawl.text_processors import ProcessorFactory
+from .strategies import ProcessorFactory  # relative import for webcrawl package
 
 HEADERS = {
     "User-Agent": (
@@ -21,14 +20,13 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9,gu;q=0.8",
 }
 
-# ============================
-# Scraper Functions
-# ============================
-
-stats = {"links": 0, "sentences": 0, "failed": 0}
+stats = {"new_links": 0, "skipped_links": 0, "sentences": 0, "failed": 0}
 exclude_patterns = []
 lang = "gu"
 processors = []
+count_skipped = False
+max_pages = 0
+min_sentences = 1
 
 def init_db(db_file):
     conn = sqlite3.connect(db_file)
@@ -72,13 +70,29 @@ def process_sentence(sentence, processors):
         s = p.process(s)
     return s
 
-def scrape_page(url, conn, depth, max_depth, visited, max_pages, unicode_flag, delay):
-    if len(visited) >= max_pages or url in visited:
+def stop_condition():
+    # normal stop: enough pages AND sentences
+    if stats["new_links"] >= max_pages and stats["sentences"] >= min_sentences:
+        return True
+    # hard stop: touched too many links overall
+    if stats["new_links"] + stats["skipped_links"] >= max_total_links:
+        logging.warning("Reached max_total_links hard stop.")
+        return True
+    return False
+
+def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, is_root=False):
+    global stats, count_skipped
+
+    if stop_condition():
+        return
+    if url in visited:
         return
     visited.add(url)
 
-    if url_already_scraped(conn, url):
+    # only skip non-root URLs if already in DB
+    if not is_root and url_already_scraped(conn, url):
         logging.info(f"Skipping already-scraped URL: {url}")
+        stats["skipped_links"] += 1
         return
 
     logging.info(f"Visiting: {url} (depth={depth})")
@@ -113,7 +127,7 @@ def scrape_page(url, conn, depth, max_depth, visited, max_pages, unicode_flag, d
                 inserted += 1
             conn.commit()
 
-        stats["links"] += 1
+        stats["new_links"] += 1
         stats["sentences"] += inserted
         logging.info(f"{url} → {inserted} sentences inserted (Total: {stats['sentences']})")
 
@@ -124,18 +138,14 @@ def scrape_page(url, conn, depth, max_depth, visited, max_pages, unicode_flag, d
     if delay > 0:
         time.sleep(random.uniform(0, delay))
 
-    if depth < max_depth:
+    if depth < max_depth and not stop_condition():
         for a in soup.find_all("a", href=True):
             next_url = urljoin(url, a["href"])
             if urlparse(next_url).netloc != urlparse(url).netloc:
                 continue
             if is_excluded(next_url):
                 continue
-            scrape_page(next_url, conn, depth+1, max_depth, visited, max_pages, unicode_flag, delay)
-
-# ============================
-# Main
-# ============================
+            scrape_page(next_url, conn, depth+1, max_depth, visited, unicode_flag, delay)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gujarati News Scraper with Strategy + Factory")
@@ -156,19 +166,25 @@ if __name__ == "__main__":
 
     exclude_patterns = config.get("exclude_patterns", [])
     lang = config.get("indic", {}).get("lang", "gu")
+    count_skipped = config.get("count_skipped", False)
+    max_pages = config.get("max_pages", 50)
+    min_sentences = config.get("min_sentences", 1)
+    max_total_links = config.get("max_total_links", 200)
 
     conn = init_db(config["db_file"])
-
     processors = ProcessorFactory.build_processors(config.get("processors", {}), conn)
+
     logging.info(f"Enabled processors: {[p.__class__.__name__ for p in processors]}")
+    logging.info(f"Config: max_pages={max_pages}, min_sentences={min_sentences}, count_skipped={count_skipped}")
 
     try:
         scrape_page(
             config["base_url"], conn,
             0, config.get("depth", 1),
-            set(), config.get("max_pages", 50),
+            set(),
             config.get("unicode", False),
-            config.get("delay", 0)
+            config.get("delay", 0),
+            is_root=True
         )
     except Exception as e:
         logging.critical("Fatal error in scraping loop", exc_info=True)
@@ -176,7 +192,8 @@ if __name__ == "__main__":
         conn.close()
 
     logging.info("========== SUMMARY ==========")
-    logging.info(f"Links visited    : {stats['links']}")
+    logging.info(f"New links visited : {stats['new_links']}")
+    logging.info(f"Skipped links     : {stats['skipped_links']}")
     logging.info(f"Sentences inserted: {stats['sentences']}")
-    logging.info(f"Failed links     : {stats['failed']}")
+    logging.info(f"Failed links      : {stats['failed']}")
     logging.info("=============================")

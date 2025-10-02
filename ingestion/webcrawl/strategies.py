@@ -1,10 +1,5 @@
-# ============================
-# Sentence Processor Strategies
-# ============================
-
-import logging
 import re
-
+import logging
 
 class SentenceProcessor:
     def process(self, sentence: str) -> str | None:
@@ -28,7 +23,7 @@ class GujaratiFilter(SentenceProcessor):
         gujarati_chars = sum(1 for c in sentence if '\u0A80' <= c <= '\u0AFF')
         total_chars = sum(1 for c in sentence if c.isalpha())
         if total_chars == 0 or gujarati_chars / total_chars < self.threshold:
-            logging.warning(f"[NON-GU] Skipping: {sentence}")
+            logging.warning(f"[NON-GU] Skipping: {sentence[:80]}...")
             return None
         return sentence
 
@@ -43,56 +38,38 @@ class Deduplicator(SentenceProcessor):
             return None
         return sentence
 
-class LengthFilter(SentenceProcessor):
-    def __init__(self, min_len=5, max_len=500):
-        self.min_len = min_len
-        self.max_len = max_len
+class WordCountFilter(SentenceProcessor):
+    def __init__(self, min_words=4, max_words=80):
+        self.min_words = min_words
+        self.max_words = max_words
 
     def process(self, sentence):
-        length = len(sentence)
-        if length < self.min_len or length > self.max_len:
-            logging.warning(f"[LEN] Skipping sentence (len={length}): {sentence[:80]}...")
+        words = sentence.split()
+        wc = len(words)
+        if wc < self.min_words:
+            logging.warning(f"[WORDS] Too short ({wc} words): {sentence}")
+            return None
+        if wc > self.max_words:
+            logging.warning(f"[WORDS] Too long ({wc} words): {sentence[:80]}...")
             return None
         return sentence
 
-class StopwordFilter(SentenceProcessor):
-    def __init__(self, stopwords=None):
-        self.stopwords = set(stopwords or [])
-
+class TruncatedSentenceFilter(SentenceProcessor):
     def process(self, sentence):
-        tokens = sentence.split()
-        if all(tok in self.stopwords for tok in tokens):
-            logging.warning(f"[STOPWORD] Skipping: {sentence}")
+        if re.search(r'\.\s*\.', sentence):   # matches ". ." or "..."
+            logging.warning(f"[TRUNC] Skipping truncated sentence: {sentence[:80]}...")
             return None
         return sentence
 
-class DigitHeavyFilter(SentenceProcessor):
-    def __init__(self, max_digit_ratio=0.5):
-        self.max_digit_ratio = max_digit_ratio
-
-    def process(self, sentence):
-        digits = sum(1 for c in sentence if c.isdigit())
-        total = len(sentence)
-        if total == 0:
-            return None
-        if digits / total > self.max_digit_ratio:
-            logging.warning(f"[DIGIT] Skipping numeric-heavy sentence: {sentence}")
-            return None
-        return sentence
-    
-# ============================
-# Factory Pattern
-# ============================
-
+# Factory
 class ProcessorFactory:
     registry = {
         "QuoteNormalizer": QuoteNormalizer,
         "DotCleaner": DotCleaner,
         "GujaratiFilter": GujaratiFilter,
         "Deduplicator": Deduplicator,
-        "LengthFilter": LengthFilter,
-        "StopwordFilter": StopwordFilter,
-        "DigitHeavyFilter": DigitHeavyFilter
+        "WordCountFilter": WordCountFilter,
+        "TruncatedSentenceFilter": TruncatedSentenceFilter
     }
 
     @classmethod
@@ -103,7 +80,7 @@ class ProcessorFactory:
                 logging.warning(f"Unknown processor: {name}, skipping")
                 continue
             klass = cls.registry[name]
-            if name == "Deduplicator":   # requires DB connection
+            if name == "Deduplicator":
                 processors.append(klass(conn))
             elif isinstance(params, dict):
                 processors.append(klass(**params))

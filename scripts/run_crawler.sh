@@ -15,4 +15,4 @@ export INDIC_RESOURCES_PATH
 echo "Using INDIC_RESOURCES_PATH=$INDIC_RESOURCES_PATH"
 echo "Starting crawler with config: $CONFIG_FILE"
 
-python3 ingestion/webcrawl/scraper.py --config "$CONFIG_FILE"
+python3 -m ingestion.webcrawl.scraper --config "$CONFIG_FILE"
