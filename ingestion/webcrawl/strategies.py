@@ -61,6 +61,32 @@ class TruncatedSentenceFilter(SentenceProcessor):
             return None
         return sentence
 
+class BalancedQuotesFilter(SentenceProcessor):
+    def process(self, sentence):
+        # Normalize fancy quotes to straight for counting
+        normalized = (
+            sentence.replace("“", '"')
+                    .replace("”", '"')
+                    .replace("‘", "'")
+                    .replace("’", "'")
+        )
+
+        # Fix unbalanced double quotes
+        double_count = normalized.count('"')
+        if double_count % 2 != 0:
+            logging.warning(f"[QUOTE] Fixing unbalanced double quotes: {sentence[:80]}...")
+            # Remove first occurrence of unmatched double quote
+            sentence = sentence.replace("“", "").replace("”", "").replace('"', "", 1)
+
+        # Fix unbalanced single quotes
+        single_count = normalized.count("'")
+        if single_count % 2 != 0:
+            logging.warning(f"[QUOTE] Fixing unbalanced single quotes: {sentence[:80]}...")
+            sentence = sentence.replace("‘", "").replace("’", "").replace("'", "", 1)
+
+        return sentence.strip()
+
+
 # Factory
 class ProcessorFactory:
     registry = {
