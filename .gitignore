@@ -17,3 +17,4 @@ crawl_configs/
 
 backups/
 crawl_configs/
+urls_discovered.txt
