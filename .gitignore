@@ -8,8 +8,12 @@ venv311/
 
 # OS junk
 .DS_Store
-Thumbs.db
+*.db
+crawl_configs/
 
 # Logs
 *.log
 *.out
+
+backups/
+crawl_configs/

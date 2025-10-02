@@ -53,6 +53,5 @@ psql -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -f schema/bhashasetu.sql
 # Step 4: Seed reference data
 echo "🌱 Seeding baseline data..."
 psql -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -f seeds/bhashasetu-seed.sql
-
-echo "✅ Done! Database reset complete."
+psql -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -f seeds/jparacrawl-seed.sql
 echo "    Backup saved at: $BACKUP_FILE"
