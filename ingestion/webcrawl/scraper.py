@@ -1,55 +1,53 @@
+#!/usr/bin/env python3
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
 import sqlite3
+import json
 import re
-import argparse
+import logging
 import time
 import random
-import logging
-import json
-from indicnlp.tokenize import sentence_tokenize
-from .strategies import ProcessorFactory  # relative import for webcrawl package
+import argparse
+from urllib.parse import urljoin, urlparse
+from .strategies import ProcessorFactory
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9,gu;q=0.8",
-}
+USER_AGENTS = [
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.129 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.129 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.129 Safari/537.36 Edg/122.0.2365.92"
+]
 
-stats = {"new_links": 0, "skipped_links": 0, "sentences": 0, "failed": 0}
+def make_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,gu;q=0.8",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",  # Do Not Track
+        "Connection": "keep-alive"
+    }
+
+# Global stats
+stats = {"new_links": 0, "skipped_links": 0, "sentences": 0, "failed_links": 0}
 exclude_patterns = []
-lang = "gu"
-processors = []
-count_skipped = False
-max_pages = 0
+dry_run = False
+discovered_urls = set()
+
+# Stop condition variables
+max_pages = 50
 min_sentences = 1
+max_total_links = 200
 
-def init_db(db_file):
-    conn = sqlite3.connect(db_file)
-    cur = conn.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS links (
-        id INTEGER PRIMARY KEY,
-        url TEXT UNIQUE,
-        scraped_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS staging_sentences (
-        id INTEGER PRIMARY KEY,
-        link_id INTEGER,
-        sentence TEXT,
-        FOREIGN KEY(link_id) REFERENCES links(id)
-    )""")
-    conn.commit()
-    return conn
 
-def clean_text(text):
-    return re.sub(r'\s+', ' ', text).strip()
+def stop_condition():
+    if stats["new_links"] >= max_pages and stats["sentences"] >= min_sentences:
+        return True
+    if stats["new_links"] + stats["skipped_links"] >= max_total_links:
+        logging.warning("Reached max_total_links hard stop.")
+        return True
+    return False
 
-def split_sentences(text):
-    return sentence_tokenize.sentence_split(text, lang)
 
 def is_excluded(url):
     for pat in exclude_patterns:
@@ -57,143 +55,180 @@ def is_excluded(url):
             return True
     return False
 
+
 def url_already_scraped(conn, url):
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM links WHERE url=? LIMIT 1", (url,))
     return cur.fetchone() is not None
 
-def process_sentence(sentence, processors):
-    s = sentence.strip()
-    for p in processors:
-        if s is None:
-            return None
-        s = p.process(s)
-    return s
 
-def stop_condition():
-    # normal stop: enough pages AND sentences
-    if stats["new_links"] >= max_pages and stats["sentences"] >= min_sentences:
-        return True
-    # hard stop: touched too many links overall
-    if stats["new_links"] + stats["skipped_links"] >= max_total_links:
-        logging.warning("Reached max_total_links hard stop.")
-        return True
-    return False
+def insert_link(conn, url):
+    cur = conn.cursor()
+    cur.execute("INSERT INTO links(url) VALUES (?)", (url,))
+    return cur.lastrowid
 
-def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, is_root=False):
-    global stats, count_skipped
 
+def insert_sentence(conn, link_id, sentence):
+    cur = conn.cursor()
+    cur.execute("INSERT INTO staging_sentences(link_id, sentence) VALUES (?, ?)", (link_id, sentence))
+
+
+def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, processors, is_root=False):
+    global stats, dry_run, discovered_urls
+
+    # 🚨 DRY RUN MODE — EARLY EXIT
+    if dry_run:
+        if url in discovered_urls:
+            return
+        discovered_urls.add(url)
+
+        logging.info(f"[DRY-RUN] Would visit: {url}")
+        with open("urls_discovered.txt", "a", encoding="utf-8") as f:
+            f.write(url + "\n")
+
+        if depth < max_depth:
+            try:
+                r = requests.get(url, headers=make_headers(), timeout=15)
+                r.raise_for_status()
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    next_url = urljoin(url, a["href"])
+                    if urlparse(next_url).netloc != urlparse(url).netloc:
+                        continue
+                    if is_excluded(next_url):
+                        logging.debug(f"[DRY-RUN] Skipping excluded: {next_url}")
+                        continue
+                    scrape_page(next_url, None, depth + 1, max_depth, visited, unicode_flag, delay, [])
+            except Exception as e:
+                logging.warning(f"[DRY-RUN] Failed to fetch links from {url}: {e}")
+        return
+
+    # 🚨 NORMAL MODE
     if stop_condition():
         return
     if url in visited:
         return
     visited.add(url)
 
-    # only skip non-root URLs if already in DB
     if not is_root and url_already_scraped(conn, url):
         logging.info(f"Skipping already-scraped URL: {url}")
         stats["skipped_links"] += 1
         return
 
     logging.info(f"Visiting: {url} (depth={depth})")
-
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        time.sleep(random.uniform(0, delay))  # polite crawling
+        r = requests.get(url, headers=make_headers(), timeout=15)
         r.raise_for_status()
     except Exception as e:
-        logging.error(f"Failed to fetch {url} ({e})", exc_info=True)
-        stats["failed"] += 1
+        logging.error(f"Failed: {url} ({e})")
+        stats["failed_links"] += 1
         return
 
-    try:
-        soup = BeautifulSoup(r.text, "html.parser")
-        text_blocks = [p.get_text() for p in soup.find_all("p")]
-        text = clean_text(" ".join(text_blocks))
+    soup = BeautifulSoup(r.text, "html.parser")
+    text = soup.get_text(" ", strip=True)
 
-        inserted = 0
-        if text:
-            cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO links(url) VALUES (?)", (url,))
-            link_id = cur.lastrowid or cur.execute("SELECT id FROM links WHERE url=?", (url,)).fetchone()[0]
+    sentences = [s.strip() for s in re.split(r'[।?!\.]', text) if s.strip()]
 
-            raw_sentences = split_sentences(text)
-            for raw in raw_sentences:
-                s = process_sentence(raw, processors)
-                if not s:
-                    continue
-                if unicode_flag:
-                    s = s.encode('unicode_escape').decode('utf-8')
-                cur.execute("INSERT INTO staging_sentences(link_id, sentence) VALUES (?, ?)", (link_id, s))
+    inserted = 0
+    for s in sentences:
+        for p in processors:
+            s = p.process(s)
+            if not s:
+                break
+        if s:
+            if unicode_flag:
+                s = s.encode("unicode_escape").decode("utf-8")
+            try:
+                if is_root:
+                    link_id = insert_link(conn, url)
+                    conn.commit()
+                else:
+                    cur = conn.cursor()
+                    cur.execute("SELECT id FROM links WHERE url=? LIMIT 1", (url,))
+                    row = cur.fetchone()
+                    if row:
+                        link_id = row[0]
+                    else:
+                        link_id = insert_link(conn, url)
+                        conn.commit()
+                insert_sentence(conn, link_id, s)
+                conn.commit()
                 inserted += 1
-            conn.commit()
+                stats["sentences"] += 1
+            except Exception as e:
+                logging.error(f"Failed inserting sentence: {e}")
 
-        stats["new_links"] += 1
-        stats["sentences"] += inserted
-        logging.info(f"{url} → {inserted} sentences inserted (Total: {stats['sentences']})")
+    logging.info(f"{url} → {inserted} sentences inserted (Total: {stats['sentences']})")
+    stats["new_links"] += 1
 
-    except Exception as e:
-        logging.error(f"Error processing {url}: {e}", exc_info=True)
-        return
-
-    if delay > 0:
-        time.sleep(random.uniform(0, delay))
-
-    if depth < max_depth and not stop_condition():
+    if depth < max_depth:
         for a in soup.find_all("a", href=True):
             next_url = urljoin(url, a["href"])
             if urlparse(next_url).netloc != urlparse(url).netloc:
                 continue
             if is_excluded(next_url):
+                logging.info(f"Excluded: {next_url}")
                 continue
-            scrape_page(next_url, conn, depth+1, max_depth, visited, unicode_flag, delay)
+            scrape_page(next_url, conn, depth + 1, max_depth, visited, unicode_flag, delay, processors)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gujarati News Scraper with Strategy + Factory")
+
+def main():
+    global exclude_patterns, max_pages, min_sentences, max_total_links, dry_run
+
+    parser = argparse.ArgumentParser(description="Gujarati News Scraper")
     parser.add_argument("--config", required=True, help="Path to JSON config file")
+    parser.add_argument("--dry-run", action="store_true", help="Exploratory dry-run: only print/save URLs, no DB")
     args = parser.parse_args()
+
+    dry_run = args.dry_run
 
     with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(config.get("log_file", "scraper.log"), encoding="utf-8"),
-            logging.StreamHandler()
-        ]
-    )
-
+    db_file = config["db_file"]
+    base_url = config["base_url"]
+    depth = config.get("depth", 1)
+    delay = config.get("delay", 5)
+    unicode_flag = config.get("unicode", False)
     exclude_patterns = config.get("exclude_patterns", [])
-    lang = config.get("indic", {}).get("lang", "gu")
-    count_skipped = config.get("count_skipped", False)
+
     max_pages = config.get("max_pages", 50)
     min_sentences = config.get("min_sentences", 1)
     max_total_links = config.get("max_total_links", 200)
 
-    conn = init_db(config["db_file"])
-    processors = ProcessorFactory.build_processors(config.get("processors", {}), conn)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler()]
+    )
 
-    logging.info(f"Enabled processors: {[p.__class__.__name__ for p in processors]}")
-    logging.info(f"Config: max_pages={max_pages}, min_sentences={min_sentences}, count_skipped={count_skipped}")
+    logging.info(f"Starting crawler with config: {args.config}")
+    logging.info(f"Config: max_pages={max_pages}, min_sentences={min_sentences}, max_total_links={max_total_links}, dry_run={dry_run}")
 
-    try:
-        scrape_page(
-            config["base_url"], conn,
-            0, config.get("depth", 1),
-            set(),
-            config.get("unicode", False),
-            config.get("delay", 0),
-            is_root=True
-        )
-    except Exception as e:
-        logging.critical("Fatal error in scraping loop", exc_info=True)
-    finally:
-        conn.close()
+    if dry_run:
+        open("urls_discovered.txt", "w").close()  # reset file
+        processors = []  # 🚨 no processors in dry-run
+        conn = None
+    else:
+        conn = sqlite3.connect(db_file)
+        processors = ProcessorFactory.build_processors(config.get("processors", {}), conn)
+        logging.info(f"Enabled processors: {[p.__class__.__name__ for p in processors]}")
+
+    visited = set()
+
+    scrape_page(base_url, conn, 0, depth, visited, unicode_flag, delay, processors, is_root=True)
 
     logging.info("========== SUMMARY ==========")
     logging.info(f"New links visited : {stats['new_links']}")
     logging.info(f"Skipped links     : {stats['skipped_links']}")
     logging.info(f"Sentences inserted: {stats['sentences']}")
-    logging.info(f"Failed links      : {stats['failed']}")
+    logging.info(f"Failed links      : {stats['failed_links']}")
     logging.info("=============================")
+
+    if conn:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -61,7 +61,60 @@ class TruncatedSentenceFilter(SentenceProcessor):
             return None
         return sentence
 
+import logging
+
 class BalancedQuotesFilter(SentenceProcessor):
+    def process(self, sentence):
+        # Use a copy of the original sentence for modifications
+        modified_sentence = sentence
+        
+        # Define quote groups for targeted removal
+        DOUBLE_QUOTES = ['"', '“', '”']
+        SINGLE_QUOTES = ["'", '‘', '’']
+
+        # --- Double Quotes Logic ---
+        
+        # Normalize double quotes to straight for accurate count
+        normalized_double = modified_sentence.replace("“", '"').replace("”", '"')
+        double_count = normalized_double.count('"')
+
+        if double_count % 2 != 0:
+            logging.warning(f"[QUOTE] Fixing unbalanced double quotes: {modified_sentence[:80]}...")
+            
+            # Find the last position of *any* double quote character
+            last_index = -1
+            for char in DOUBLE_QUOTES:
+                rfind_index = modified_sentence.rfind(char)
+                if rfind_index > last_index:
+                    last_index = rfind_index
+            
+            # Surgically remove the character at the last found index
+            if last_index != -1:
+                modified_sentence = modified_sentence[:last_index] + modified_sentence[last_index+1:]
+
+        # --- Single Quotes Logic ---
+        
+        # Normalize single quotes to straight for accurate count (on the potentially modified string)
+        normalized_single = modified_sentence.replace("‘", "'").replace("’", "'")
+        single_count = normalized_single.count("'")
+        
+        if single_count % 2 != 0:
+            logging.warning(f"[QUOTE] Fixing unbalanced single quotes: {modified_sentence[:80]}...")
+            
+            # Find the last position of *any* single quote character
+            last_index = -1
+            for char in SINGLE_QUOTES:
+                rfind_index = modified_sentence.rfind(char)
+                if rfind_index > last_index:
+                    last_index = rfind_index
+            
+            # Surgically remove the character at the last found index
+            if last_index != -1:
+                modified_sentence = modified_sentence[:last_index] + modified_sentence[last_index+1:]
+
+        return modified_sentence.strip()
+
+class BalancedQuotesFilter1(SentenceProcessor):
     def process(self, sentence):
         # Normalize fancy quotes to straight for counting
         normalized = (
@@ -95,7 +148,8 @@ class ProcessorFactory:
         "GujaratiFilter": GujaratiFilter,
         "Deduplicator": Deduplicator,
         "WordCountFilter": WordCountFilter,
-        "TruncatedSentenceFilter": TruncatedSentenceFilter
+        "TruncatedSentenceFilter": TruncatedSentenceFilter,
+        "BalancedQuotesFilter": BalancedQuotesFilter
     }
 
     @classmethod

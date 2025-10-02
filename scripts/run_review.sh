@@ -15,4 +15,4 @@ export INDIC_RESOURCES_PATH
 echo "Using INDIC_RESOURCES_PATH=$INDIC_RESOURCES_PATH"
 echo "Starting review app with config: $CONFIG_FILE"
 
-python3 -m ingestion.webcrawl.text_review_app --config "$CONFIG_FILE"
+python3 -m ingestion.webcrawl.review_app --config "$CONFIG_FILE"
