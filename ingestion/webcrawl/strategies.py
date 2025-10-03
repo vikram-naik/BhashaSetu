@@ -2,7 +2,7 @@ import re
 import logging
 
 class SentenceProcessor:
-    def process(self, sentence: str) -> str | None:
+    def process(self, sentence: str, metadata: dict = None) -> str | None:
         raise NotImplementedError
 
 class QuoteNormalizer(SentenceProcessor):
@@ -139,6 +139,34 @@ class BalancedQuotesFilter1(SentenceProcessor):
 
         return sentence.strip()
 
+class PatternRejector(SentenceProcessor):
+    def __init__(self, patterns):
+        # compile regex patterns (case-insensitive)
+        self.patterns = [re.compile(p, re.IGNORECASE) for p in patterns]
+
+    def process(self, sentence, metadata=None):
+        for pat in self.patterns:
+            if pat.search(sentence):
+                logging.info(f"[AUTO-REJECT] '{sentence[:80]}...' matched {pat.pattern}")
+                # return a tuple (sentence, override_status)
+                return (sentence, "rejected")
+        return sentence
+
+class SkipRootText(SentenceProcessor):
+    """
+    Skips inserting sentences if we are on the base_url page.
+    Uses metadata['is_root'] flag from scraper.
+    """
+    def __init__(self, skip=True):
+        self.skip = skip
+
+    def process(self, sentence, metadata=None):
+        if self.skip and metadata and metadata.get("is_root"):
+            logging.info("[SKIP-ROOT] Skipping sentence from base_url page")
+            return None  # drop sentence
+        return sentence
+
+
 
 # Factory
 class ProcessorFactory:
@@ -149,7 +177,9 @@ class ProcessorFactory:
         "Deduplicator": Deduplicator,
         "WordCountFilter": WordCountFilter,
         "TruncatedSentenceFilter": TruncatedSentenceFilter,
-        "BalancedQuotesFilter": BalancedQuotesFilter
+        "BalancedQuotesFilter": BalancedQuotesFilter,
+        "PatternRejector": PatternRejector,
+        "SkipRootText": SkipRootText
     }
 
     @classmethod
@@ -167,3 +197,41 @@ class ProcessorFactory:
             else:
                 processors.append(klass())
         return processors
+
+
+class SentenceSplitterFactory:
+    @staticmethod
+    def build(tokenizer_conf):
+        ttype = tokenizer_conf.get("type", "regex")
+        lang = tokenizer_conf.get("lang", "gu")
+
+        if ttype == "indic":
+            # Lazy import
+            def splitter(text):
+                try:
+                    from indicnlp.tokenize.sentence_tokenize import sentence_split
+                    return sentence_split(text, lang=lang)
+                except Exception as e:
+                    logging.warning(f"Indic NLP failed, fallback to regex: {e}")
+                    return [s.strip() for s in re.split(r'(?<=[।?!\.])', text) if s.strip()]
+            return splitter
+
+        elif ttype == "stanza":
+            # Lazy load stanza pipeline (only once)
+            _nlp = {"pipe": None}
+            def splitter(text):
+                try:
+                    if _nlp["pipe"] is None:
+                        import stanza
+                        _nlp["pipe"] = stanza.Pipeline(lang=lang, processors="tokenize", use_gpu=True)
+                    doc = _nlp["pipe"](text)
+                    return [s.text for s in doc.sentences]
+                except Exception as e:
+                    logging.warning(f"Stanza failed, fallback to regex: {e}")
+                    return [s.strip() for s in re.split(r'(?<=[।?!\.])', text) if s.strip()]
+            return splitter
+
+        else:  # regex fallback
+            def splitter(text):
+                return [s.strip() for s in re.split(r'(?<=[।?!\.])', text) if s.strip()]
+            return splitter

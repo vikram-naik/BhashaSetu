@@ -9,7 +9,7 @@ import time
 import random
 import argparse
 from urllib.parse import urljoin, urlparse
-from .strategies import ProcessorFactory
+from .strategies import ProcessorFactory, SentenceSplitterFactory
 
 USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.129 Safari/537.36",
@@ -61,19 +61,21 @@ def url_already_scraped(conn, url):
     cur.execute("SELECT 1 FROM links WHERE url=? LIMIT 1", (url,))
     return cur.fetchone() is not None
 
-
 def insert_link(conn, url):
     cur = conn.cursor()
-    cur.execute("INSERT INTO links(url) VALUES (?)", (url,))
-    return cur.lastrowid
+    cur.execute("INSERT OR IGNORE INTO links(url) VALUES (?)", (url,))
+    conn.commit()
+    cur.execute("SELECT id FROM links WHERE url=? LIMIT 1", (url,))
+    return cur.fetchone()[0]
 
-
-def insert_sentence(conn, link_id, sentence):
+def insert_sentence(conn, link_id, sentence, status_override=None):
     cur = conn.cursor()
-    cur.execute("INSERT INTO staging_sentences(link_id, sentence) VALUES (?, ?)", (link_id, sentence))
+    status = status_override if status_override else 'new'
+    cur.execute("INSERT INTO staging_sentences(link_id, sentence, status) VALUES (?, ?, ?)",
+                (link_id, sentence, status))
 
 
-def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, processors, is_root=False):
+def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, processors, is_root=False, splitter=None):
     global stats, dry_run, discovered_urls
 
     # 🚨 DRY RUN MODE — EARLY EXIT
@@ -128,14 +130,27 @@ def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, proce
     soup = BeautifulSoup(r.text, "html.parser")
     text = soup.get_text(" ", strip=True)
 
-    sentences = [s.strip() for s in re.split(r'[।?!\.]', text) if s.strip()]
+    sentences = splitter(text)
 
     inserted = 0
+    metadata = {"is_root": is_root, "url": url}
     for s in sentences:
+        status_override = None
         for p in processors:
-            s = p.process(s)
-            if not s:
+            result = p.process(s, metadata=metadata)
+            if not result:
+                s = None
                 break
+            if isinstance(result, tuple):
+                s, st = result
+                if not s:  # processor dropped sentence
+                    s = None
+                    break
+                if st:
+                    status_override = st
+            else:
+                s = result
+
         if s:
             if unicode_flag:
                 s = s.encode("unicode_escape").decode("utf-8")
@@ -152,12 +167,13 @@ def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, proce
                     else:
                         link_id = insert_link(conn, url)
                         conn.commit()
-                insert_sentence(conn, link_id, s)
+                insert_sentence(conn, link_id, s, status_override)
                 conn.commit()
                 inserted += 1
                 stats["sentences"] += 1
             except Exception as e:
                 logging.error(f"Failed inserting sentence: {e}")
+
 
     logging.info(f"{url} → {inserted} sentences inserted (Total: {stats['sentences']})")
     stats["new_links"] += 1
@@ -170,7 +186,26 @@ def scrape_page(url, conn, depth, max_depth, visited, unicode_flag, delay, proce
             if is_excluded(next_url):
                 logging.info(f"Excluded: {next_url}")
                 continue
-            scrape_page(next_url, conn, depth + 1, max_depth, visited, unicode_flag, delay, processors)
+            scrape_page(next_url, conn, depth + 1, max_depth, visited, unicode_flag, delay, processors, splitter=splitter)
+
+
+def init_db(conn):
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS staging_sentences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            link_id INTEGER,
+            sentence TEXT,
+            FOREIGN KEY(link_id) REFERENCES links(id)
+        )
+    """)
+    conn.commit()
 
 
 def main():
@@ -193,6 +228,9 @@ def main():
     unicode_flag = config.get("unicode", False)
     exclude_patterns = config.get("exclude_patterns", [])
 
+    tokenizer_conf = config.get("tokenizer", {"type": "regex", "lang": "gu"})
+    splitter = SentenceSplitterFactory.build(tokenizer_conf)
+
     max_pages = config.get("max_pages", 50)
     min_sentences = config.get("min_sentences", 1)
     max_total_links = config.get("max_total_links", 200)
@@ -212,12 +250,13 @@ def main():
         conn = None
     else:
         conn = sqlite3.connect(db_file)
+        init_db(conn)
         processors = ProcessorFactory.build_processors(config.get("processors", {}), conn)
         logging.info(f"Enabled processors: {[p.__class__.__name__ for p in processors]}")
 
     visited = set()
 
-    scrape_page(base_url, conn, 0, depth, visited, unicode_flag, delay, processors, is_root=True)
+    scrape_page(base_url, conn, 0, depth, visited, unicode_flag, delay, processors, is_root=True, splitter=splitter)
 
     logging.info("========== SUMMARY ==========")
     logging.info(f"New links visited : {stats['new_links']}")
