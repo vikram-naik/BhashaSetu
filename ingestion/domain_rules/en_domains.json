@@ -1,0 +1,21 @@
+{
+  "finance": { "name": "Finance / Business / Economy", "keywords": ["bank", "stock", "market", "gdp", "inflation", "trade"] },
+  "legal": { "name": "Law / Judiciary / Policy", "keywords": ["court", "law", "act", "petition", "verdict"] },
+  "crime": { "name": "Crime / Policing", "keywords": ["murder", "arrest", "police", "robbery", "accused"] },
+  "politics": { "name": "Politics / Governance", "keywords": ["minister", "party", "parliament", "bill", "election"] },
+  "education": { "name": "Education / Research", "keywords": ["school", "student", "exam", "university", "teacher"] },
+  "health": { "name": "Health / Medicine", "keywords": ["hospital", "doctor", "disease", "vaccine", "treatment"] },
+  "science_tech": { "name": "Science / Technology", "keywords": ["data", "ai", "research", "innovation", "experiment"] },
+  "sports": { "name": "Sports / Athletics", "keywords": ["match", "goal", "player", "tournament", "score"] },
+  "entertainment": { "name": "Movies / Music / Culture", "keywords": ["film", "actor", "song", "award", "festival"] },
+  "environment": { "name": "Climate / Ecology / Energy", "keywords": ["climate", "pollution", "rainfall", "solar", "biodiversity"] },
+  "social_issues": { "name": "Society / Welfare / NGOs", "keywords": ["protest", "inequality", "gender", "poverty"] },
+  "lifestyle": { "name": "Lifestyle / Culture / Fashion", "keywords": ["travel", "food", "festival", "trend", "fashion"] },
+  "religion": { "name": "Religion / Faith / Spirituality", "keywords": ["temple", "church", "prayer", "faith", "festival"] },
+  "real_estate": { "name": "Housing / Property / Infrastructure", "keywords": ["land", "construction", "property", "housing"] },
+  "transport": { "name": "Travel / Logistics / Aviation", "keywords": ["train", "flight", "metro", "highway", "port"] },
+  "agriculture": { "name": "Agriculture / Food Supply", "keywords": ["crop", "harvest", "farmer", "fertilizer", "rainfall"] },
+  "defence": { "name": "Military / Security / Strategy", "keywords": ["army", "navy", "border", "weapon", "drill"] },
+  "literature": { "name": "Books / Arts / Philosophy", "keywords": ["author", "poem", "story", "novel"] },
+  "misc": { "name": "Miscellaneous", "keywords": [] }
+}

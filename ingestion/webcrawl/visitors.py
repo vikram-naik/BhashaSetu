@@ -6,7 +6,7 @@ import requests
 import sqlite3
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
-from .repositories import LinkRepository, SentenceRepository, init_db
+from .repositories import DomainRepository, LinkRepository, SentenceDomainRepository, SentenceRepository, init_db
 from .strategies import SentenceSplitterFactory, ProcessorFactory, ProcessorResult
 
 # ---------------------------------------------------------
@@ -234,10 +234,35 @@ class DBVisitor(Visitor):
 
         try:
             link_id = self.links.insert(page.url)
-            for s, st in zip(page.sentences, page.sentence_statuses):
-                self.sentences.insert(link_id, s, st)
+            domain_repo = DomainRepository(self.conn)
+            sentence_domain_repo = SentenceDomainRepository(self.conn)
+
+            # For each processed sentence
+            for r in getattr(page, "processed_results", []):
+                s = r.text
+                st = r.status or "new"
+
+                # Insert sentence and get its ID
+                sentence_id = self.sentences.insert(link_id, s, st)
+
+                # Get domain info from metadata (if any)
+                meta = getattr(r, "metadata", {}) or {}
+                domain_code = meta.get("domain_code", "misc")
+                domain_name = meta.get("domain_name", "Miscellaneous")
+
+                # Resolve domain_id only here (no DB ops in processor)
+                domain_id = domain_repo.get_or_create(domain_code, domain_name)
+
+                # Insert mapping
+                sentence_domain_repo.insert(
+                    sentence_id,
+                    domain_id,
+                    confidence=meta.get("confidence"),
+                    source=meta.get("source", "rule_based")
+                )
+
             self.conn.commit()
-            context.log(f"[DBVisitor] Inserted {len(page.sentences)} sentences with statuses")
+            context.log(f"[DBVisitor] Inserted {len(page.sentences)} sentences with domain mappings")
         except Exception as e:
             context.stats["errors"] += 1
             context.log(f"[DBVisitor] Insert failed: {e}")

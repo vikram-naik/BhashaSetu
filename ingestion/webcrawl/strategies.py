@@ -2,13 +2,16 @@ from abc import ABC, abstractmethod
 import re
 import logging
 from dataclasses import dataclass
+import os
+import json
+from .repositories import DomainRepository
 
 @dataclass
 class ProcessorResult:
     text: str | None
     status: str | None = "new"
     reject: bool = False
-
+    metadata: dict | None = None
 
 class SentenceProcessor(ABC):
     @abstractmethod
@@ -149,6 +152,89 @@ class SkipRootText(SentenceProcessor):
         return r
 
 
+class DomainClassifier(SentenceProcessor):
+    """
+    Language-aware rule-based domain classifier.
+
+    Loads domain keyword rules from external JSON files based on the language
+    defined in config param for processor {'lang': 'gu'}.
+    Produces metadata (domain_code, domain_name, confidence, source),
+    leaving DB persistence to DBVisitor.
+    """
+
+    def __init__(self, lang):
+        self.lang = lang
+        self.rules = self._load_rules(self.lang)
+        logging.info(f"[DomainClassifier] Loaded {len(self.rules)} domain rules for lang: {self.lang}")
+
+    # ----------------------------------------------------------
+    # Load rules from domain_rules/<lang>_domains.json
+    # ----------------------------------------------------------
+    def _load_rules(self, lang):
+        base_dir = os.path.join(os.path.dirname(__file__), "..", "domain_rules")
+        file_path = os.path.join(base_dir, f"{lang}_domains.json")
+
+        if not os.path.exists(file_path):
+            logging.warning(f"[DomainClassifier] No rules for '{lang}', using English fallback.")
+            file_path = os.path.join(base_dir, "en_domains.json")
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # normalize to lowercase for keyword matching
+            rules = {
+                code: {
+                    "name": entry["name"],
+                    "keywords": [kw.lower() for kw in entry.get("keywords", [])]
+                }
+                for code, entry in data.items()
+            }
+            return rules
+        except Exception as e:
+            logging.error(f"[DomainClassifier] Failed to load rules for '{lang}': {e}")
+            return {}
+
+    # ----------------------------------------------------------
+    # Process each sentence and return domain metadata
+    # ----------------------------------------------------------
+    def process(self, sentence, metadata=None) -> ProcessorResult:
+        if not self.rules:
+            return ProcessorResult(
+                text=sentence,
+                metadata={
+                    "domain_code": "misc",
+                    "domain_name": "Miscellaneous",
+                    "source": "rule_based"
+                }
+            )
+
+        s_lower = sentence.lower()
+
+        for code, entry in self.rules.items():
+            if any(k in s_lower for k in entry["keywords"]):
+                domain_name = entry["name"]
+                logging.debug(f"[DomainClassifier] Matched domain '{domain_name}' for: {sentence[:80]}...")
+                return ProcessorResult(
+                    text=sentence,
+                    metadata={
+                        "domain_code": code,
+                        "domain_name": domain_name,
+                        "source": "rule_based",
+                        "confidence": 1.0  # placeholder, can adjust later
+                    }
+                )
+
+        # fallback
+        misc_entry = self.rules.get("misc", {"name": "Miscellaneous"})
+        return ProcessorResult(
+            text=sentence,
+            metadata={
+                "domain_code": "misc",
+                "domain_name": misc_entry["name"],
+                "source": "rule_based",
+                "confidence": 0.0
+            }
+        )
 
 # Factory
 class ProcessorFactory:
@@ -160,25 +246,23 @@ class ProcessorFactory:
         "TruncatedSentenceFilter": TruncatedSentenceFilter,
         "BalancedQuotesFilter": BalancedQuotesFilter,
         "PatternRejector": PatternRejector,
-        "SkipRootText": SkipRootText
+        "SkipRootText": SkipRootText,
+        "DomainClassifier": DomainClassifier
     }
 
     @classmethod
-    def build_processors(cls, config, conn=None):
+    def build_processors(cls, config):
         processors = []
         for name, params in config.items():
             if name not in cls.registry:
                 logging.warning(f"Unknown processor: {name}, skipping")
                 continue
             klass = cls.registry[name]
-            if name == "Deduplicator":
-                processors.append(klass(conn))
-            elif isinstance(params, dict):
+            if isinstance(params, dict):
                 processors.append(klass(**params))
             else:
                 processors.append(klass())
         return processors
-
 
 class SentenceSplitterFactory:
     @staticmethod
