@@ -19,9 +19,10 @@ class CrawlContext:
             "sentences": 0
         }
 
-    def log(self, msg):
+    def log(self, msg, level=logging.INFO):
         prefix = f"[Depth={getattr(self.page, 'depth', 0)} URL={getattr(self.page, 'url', 'N/A')}]"
-        logging.info(f"{prefix} {msg}")
+        logging.log(level, f"{prefix} {msg}")
+
 
 
 # ---------------------------------------------------------
@@ -36,6 +37,7 @@ class Crawler:
 
     def run(self, start_url):
         context = CrawlContext(self.config)
+        context.visitors = self.visitors
         context.config["base_url"] = start_url
         self._notify("on_crawl_start", context)
         # Mark the root explicitly

@@ -147,7 +147,7 @@ class SkipRootText(SentenceProcessor):
     def process(self, sentence, metadata: dict = None) -> ProcessorResult:
         r = ProcessorResult(text=sentence)
         if self.skip and metadata and metadata.get("is_root"):
-            logging.info("[SKIP-ROOT] Skipping sentence from base_url page")
+            logging.debug("[SKIP-ROOT] Skipping sentence from base_url page")
             r.reject = True  # drop sentence
         return r
 
@@ -213,7 +213,7 @@ class DomainClassifier(SentenceProcessor):
         for code, entry in self.rules.items():
             if any(k in s_lower for k in entry["keywords"]):
                 domain_name = entry["name"]
-                logging.debug(f"[DomainClassifier] Matched domain '{domain_name}' for: {sentence[:80]}...")
+                logging.info(f"[DomainClassifier] Matched domain '{domain_name}' for: {sentence[:80]}...")
                 return ProcessorResult(
                     text=sentence,
                     metadata={
@@ -223,9 +223,12 @@ class DomainClassifier(SentenceProcessor):
                         "confidence": 1.0  # placeholder, can adjust later
                     }
                 )
+            else:
+                logging.debug(f"[DomainClassifier] No match for: {sentence[:80]}..." )
 
         # fallback
         misc_entry = self.rules.get("misc", {"name": "Miscellaneous"})
+        logging.info(f"misc_entry: {misc_entry}")
         return ProcessorResult(
             text=sentence,
             metadata={

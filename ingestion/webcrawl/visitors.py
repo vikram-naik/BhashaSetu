@@ -4,18 +4,37 @@ import time
 import re
 import requests
 import sqlite3
+import functools
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
-from .repositories import DomainRepository, LinkRepository, SentenceDomainRepository, SentenceRepository, init_db
+from .repositories import (
+    DomainRepository, LinkRepository, SentenceDomainRepository,
+    SentenceRepository, init_db
+)
 from .strategies import SentenceSplitterFactory, ProcessorFactory, ProcessorResult
 
+
 # ---------------------------------------------------------
-# Helper — polite headers
+# Implicit attributes that every Page has by design
+# ---------------------------------------------------------
+IMPLICIT_PAGE_ATTRS = {
+    "page.url",
+    "page.flags",
+    "page.is_root",
+    "page.depth",
+    "page.text",
+}
+
+
+# ---------------------------------------------------------
+# Helper – polite randomized headers
 # ---------------------------------------------------------
 USER_AGENTS = [
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0",
 ]
 
 def make_headers():
@@ -26,14 +45,54 @@ def make_headers():
         "Accept-Language": "en-US,en;q=0.9,gu;q=0.8",
         "Referer": "https://www.google.com/",
         "DNT": "1",
-        "Connection": "keep-alive"
+        "Connection": "keep-alive",
     }
+
+
+# ---------------------------------------------------------
+# Aspect: automatic validation decorator
+# ---------------------------------------------------------
+def auto_validate(func):
+    """Aspect to run validate_page_state(page) automatically before visitor logic."""
+    @functools.wraps(func)
+    def wrapper(self, context, *args, **kwargs):
+        if getattr(self, "skip_auto_validate", False):
+            return func(self, context, *args, **kwargs)
+
+        page = getattr(context, "page", None)
+        if page is not None and hasattr(self, "validate_page_state"):
+            try:
+                self.validate_page_state(page)
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"[{self.__class__.__name__}.{func.__name__}] Validation failed: {e}"
+                ) from e
+        return func(self, context, *args, **kwargs)
+    return wrapper
+
+
+class VisitorMeta(type):
+    """Metaclass to auto-wrap lifecycle methods with validation aspects."""
+    def __new__(mcls, name, bases, attrs):
+        for method_name in [
+            "on_page_start",
+            "on_page_process",
+            "on_page_end",
+            "on_link_discovered",
+        ]:
+            if method_name in attrs:
+                attrs[method_name] = auto_validate(attrs[method_name])
+        return super().__new__(mcls, name, bases, attrs)
 
 
 # ---------------------------------------------------------
 # Base Visitor Interface
 # ---------------------------------------------------------
-class Visitor:
+class Visitor(metaclass=VisitorMeta):
+    consumes: list[str] = []
+    produces: list[str] = []
+    skip_auto_validate: bool = False  # opt-out for meta/system visitors
+
     def initialize(self, config): pass
     def on_crawl_start(self, context): pass
     def on_crawl_end(self, context): pass
@@ -42,11 +101,74 @@ class Visitor:
     def on_page_end(self, context): pass
     def on_link_discovered(self, context, link): pass
 
+    # ---- Runtime validation ----
+    def validate_page_state(self, page):
+        missing = [a for a in getattr(self, "consumes", []) if not self._has_attr(page, a)]
+        if missing:
+            raise RuntimeError(
+                f"Missing required attributes on Page: {missing}"
+            )
+
+    @staticmethod
+    def _has_attr(page, dotted_attr):
+        """Support dot notation and nested dicts (e.g. page.flags.excluded)"""
+        parts = dotted_attr.split(".")
+        obj = page
+        for p in parts[1:]:  # skip 'page'
+            if isinstance(obj, dict):
+                if p not in obj:
+                    return False
+                obj = obj[p]
+            elif hasattr(obj, p):
+                obj = getattr(obj, p)
+            else:
+                return False
+        return True
+
+
+# ---------------------------------------------------------
+# Visitor Chain Validator
+# ---------------------------------------------------------
+class VisitorChainValidator(Visitor):
+    skip_auto_validate = True
+    consumes = []
+    produces = []
+
+    def on_crawl_start(self, context):
+        visitors = getattr(context, "visitors", [])
+        visitor_classes = [v.__class__.__name__ for v in visitors]
+        logging.info(f"[Validator] Validating visitor chain: {visitor_classes}")
+
+        produced = set(IMPLICIT_PAGE_ATTRS)
+        for idx, v in enumerate(visitors):
+            v_name = v.__class__.__name__
+            consumes = getattr(v, "consumes", [])
+            produces = getattr(v, "produces", [])
+
+            missing = [
+                c for c in consumes
+                if c not in produced and c not in IMPLICIT_PAGE_ATTRS
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"[Validator] {v_name} requires {missing}, "
+                    f"but they are not produced by any prior visitor."
+                )
+
+            for p in produces:
+                produced.add(p)
+
+        logging.info(
+            f"[Validator] Chain validated successfully — total produced: {len(produced)}"
+        )
+
 
 # ---------------------------------------------------------
 # Stats Visitor
 # ---------------------------------------------------------
 class StatsVisitor(Visitor):
+    skip_auto_validate = True
+
     def on_crawl_start(self, context):
         logging.info(f"[Crawl] Starting crawl: {context.config.get('base_url')}")
 
@@ -63,26 +185,35 @@ class StatsVisitor(Visitor):
 # URL Tracker Visitor
 # ---------------------------------------------------------
 class URLTrackerVisitor(Visitor):
+    consumes = ["page.url"]
+    produces = ["page.flags.visited"]
+
     def on_page_start(self, context):
-        url = context.page.url
-        if url in context.visited:
-            context.page.flags["duplicate"] = True
-            context.log("Already visited — marking duplicate")
-        else:
-            context.visited.add(url)
-            context.log("New URL registered")
+        page = context.page
+        if url := getattr(page, "url", None):
+            if url in context.visited:
+                page.flags["duplicate"] = True
+                context.log("Already visited — marking duplicate")
+            else:
+                context.visited.add(url)
+                page.flags["visited"] = True
+                context.log("New URL registered")
 
 
 # ---------------------------------------------------------
 # Exclusion Visitor
 # ---------------------------------------------------------
 class ExclusionVisitor(Visitor):
+    consumes = ["page.url"]
+    produces = ["page.flags.excluded"]
+
     def on_page_start(self, context):
-        url = context.page.url
+        page = context.page
+        url = page.url
         for pat in context.config.get("exclude_patterns", []):
             if re.search(pat, url, re.IGNORECASE):
-                context.page.flags["excluded"] = True
-                context.log(f"Excluded by pattern: {pat}")
+                page.flags["excluded"] = True
+                context.log(f"[ExclusionVisitor] Excluded by pattern: {pat}")
                 return
 
 
@@ -90,12 +221,13 @@ class ExclusionVisitor(Visitor):
 # Fetcher Visitor
 # ---------------------------------------------------------
 class FetcherVisitor(Visitor):
-    """Handles polite HTTP fetching of pages, logs root differently."""
+    consumes = ["page.url", "page.flags"]
+    produces = ["page.text"]
 
     def on_page_process(self, context):
         page = context.page
         if page.should_skip():
-            context.log("[Fetcher] Skipping due to skip_processing or other flag")
+            context.log("[Fetcher] Skipping due to flags", level=logging.DEBUG)
             return
 
         root_prefix = "[ROOT] " if page.is_root else ""
@@ -119,10 +251,13 @@ class FetcherVisitor(Visitor):
 # Parser Visitor
 # ---------------------------------------------------------
 class ParserVisitor(Visitor):
+    consumes = ["page.text"]
+    produces = ["page.text_clean", "page.links"]
+
     def on_page_process(self, context):
         page = context.page
         if page.should_skip() or not getattr(page, "text", None):
-            context.log("[Parser] Skipping due to skip_processing or missing text")
+            context.log("[Parser] Skipping due to missing text", level=logging.DEBUG)
             return
 
         soup = BeautifulSoup(page.text, "html.parser")
@@ -139,6 +274,9 @@ class ParserVisitor(Visitor):
 # Sentence Processor Visitor
 # ---------------------------------------------------------
 class SentenceProcessorVisitor(Visitor):
+    consumes = ["page.text_clean"]
+    produces = ["page.processed_results", "page.sentences", "page.sentence_statuses"]
+
     def initialize(self, config):
         self.splitter = SentenceSplitterFactory.build(config.get("tokenizer", {"type": "regex"}))
         self.processors = ProcessorFactory.build_processors(config.get("processors", {}))
@@ -147,21 +285,23 @@ class SentenceProcessorVisitor(Visitor):
     def on_page_process(self, context):
         page = context.page
         if page.should_skip() or not getattr(page, "text_clean", None):
-            context.log("[SentenceProcessor] Skipping due to skip_processing or missing clean text")
+            context.log("[SentenceProcessor] Skipping — no clean text", level=logging.DEBUG)
+            page.processed_results = []
             return
 
         results: list[ProcessorResult] = []
-        metadata = {"url": page.url, "is_root": page.is_root}   # ✅ root-awareness
+        metadata = {"url": page.url, "is_root": page.is_root}
 
         for s in self.splitter(page.text_clean):
             sentence_status = None
             current_text = s
             rejected = False
+            domain_meta = {}
 
             for p in self.processors:
                 result = p.process(current_text, metadata=metadata)
                 if not isinstance(result, ProcessorResult):
-                    raise TypeError(f"{p.__class__.__name__} must return ProcessorResult, got {type(result)}")
+                    raise TypeError(f"{p.__class__.__name__} must return ProcessorResult")
 
                 if result.reject:
                     rejected = True
@@ -171,23 +311,34 @@ class SentenceProcessorVisitor(Visitor):
                 if result.status:
                     sentence_status = result.status
 
+                if result.metadata:
+                    domain_meta.update(result.metadata)
+
+                # ✅ Stop if processor marks sentence rejected
                 if result.status == "rejected":
-                    break    
+                    break
 
             if not rejected and current_text:
-                results.append(ProcessorResult(text=current_text, status=sentence_status))
+                pr = ProcessorResult(
+                    text=current_text,
+                    status=sentence_status or "new",
+                    metadata=domain_meta or {}
+                )
+                results.append(pr)
 
+        page.processed_results = results
         page.sentences = [r.text for r in results]
-        page.sentence_statuses = [r.status or "new" for r in results]
-        context.stats["sentences"] += len(page.sentences)
-        context.log(f"[SentenceProcessor] {len(page.sentences)} sentences processed")
+        page.sentence_statuses = [r.status for r in results]
+        context.stats["sentences"] += len(results)
+        context.log(f"[SentenceProcessor] {len(results)} sentences processed")
 
 
 # ---------------------------------------------------------
 # DB Visitor
 # ---------------------------------------------------------
 class DBVisitor(Visitor):
-    """Handles all database interaction (self-contained)."""
+    consumes = ["page.url", "page.flags"]
+    produces = ["page.flags.already_in_db"]
 
     def initialize(self, config):
         db_path = config.get("db_file", "crawler.db")
@@ -198,77 +349,51 @@ class DBVisitor(Visitor):
         logging.info(f"[DBVisitor] Connected and initialized DB: {db_path}")
 
     def on_page_start(self, context):
-        """Early skip if this URL already exists in the DB (except root)."""
         page = context.page
-
-        # ✅ Allow reprocessing of root page (for fresh links)
         if page.is_root:
             page.flags["already_in_db"] = False
-            page.flags["skip_processing"] = False
-            context.log("[DBVisitor] Root page detected — always process for link discovery")
+            context.log("[DBVisitor] Root page — always process for link discovery")
             return
 
-        # Regular deduplication for non-root URLs
         if self._url_exists(page.url):
             page.flags["already_in_db"] = True
             page.flags["skip_processing"] = True
-            context.log(f"[DBVisitor] URL already present in DB — skipping downstream processing")
+            context.log("[DBVisitor] URL already present in DB — skipping")
         else:
             page.flags["already_in_db"] = False
             page.flags["skip_processing"] = False
 
     def on_page_end(self, context):
         page = context.page
-
-        # ✅ Root page may not have sentences — don’t skip DB check logic
-        if page.is_root:
-            context.log("[DBVisitor] Root page processed — skipping DB insert")
+        if page.is_root or page.flags.get("already_in_db"):
             return
-
-        if page.flags.get("already_in_db"):
-            context.log("[DBVisitor] Skipped DB insert — URL already exists")
-            return
-
-        if page.should_skip() or not getattr(page, "sentences", []):
+        if page.should_skip() or not getattr(page, "processed_results", []):
             return
 
         try:
             link_id = self.links.insert(page.url)
             domain_repo = DomainRepository(self.conn)
             sentence_domain_repo = SentenceDomainRepository(self.conn)
-
-            # For each processed sentence
             for r in getattr(page, "processed_results", []):
                 s = r.text
                 st = r.status or "new"
-
-                # Insert sentence and get its ID
                 sentence_id = self.sentences.insert(link_id, s, st)
-
-                # Get domain info from metadata (if any)
                 meta = getattr(r, "metadata", {}) or {}
                 domain_code = meta.get("domain_code", "misc")
                 domain_name = meta.get("domain_name", "Miscellaneous")
-
-                # Resolve domain_id only here (no DB ops in processor)
                 domain_id = domain_repo.get_or_create(domain_code, domain_name)
-
-                # Insert mapping
                 sentence_domain_repo.insert(
-                    sentence_id,
-                    domain_id,
+                    sentence_id, domain_id,
                     confidence=meta.get("confidence"),
                     source=meta.get("source", "rule_based")
                 )
-
             self.conn.commit()
             context.log(f"[DBVisitor] Inserted {len(page.sentences)} sentences with domain mappings")
         except Exception as e:
             context.stats["errors"] += 1
             context.log(f"[DBVisitor] Insert failed: {e}")
 
-    def _url_exists(self, url: str) -> bool:
-        """Check if the URL already exists in DB."""
+    def _url_exists(self, url):
         cur = self.conn.cursor()
         cur.execute("SELECT 1 FROM links WHERE url=? LIMIT 1", (url,))
         return cur.fetchone() is not None
@@ -279,4 +404,4 @@ class DBVisitor(Visitor):
                 self.conn.close()
                 logging.info("[DBVisitor] Closed DB connection")
             except Exception as e:
-                logging.error(f"[DBVisitor] Failed to close DB connection: {e}")
+                logging.error(f"[DBVisitor] DB close error: {e}")

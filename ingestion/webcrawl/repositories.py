@@ -109,3 +109,4 @@ class SentenceDomainRepository:
             VALUES (?, ?, ?, ?)
         """, (sentence_id, domain_id, confidence, source))
         self.conn.commit()
+        return cur.lastrowid
