@@ -1,240 +1,302 @@
 {% extends "base.html" %}
-{% block title %}Sentences for {{ link_url }}{% endblock %}
+{% block title %}Sentence Review{% endblock %}
+
 {% block content %}
-<a href="{{ url_for('index') }}" class="btn btn-link">&larr; Back</a>
-<h3>Sentences for <a href="{{ link_url }}" target="_blank">{{ link_url }}</a></h3>
-<p class="text-muted">Showing {{start}}–{{end}} of {{total}} (page {{page}} / {{total_pages}})</p>
+<div class="container-fluid mt-3 mb-5">
 
-<!-- Filter + Page size (TOP) -->
-<form method="get" class="mb-3 d-flex align-items-center gap-3">
-  <input type="hidden" name="page" value="1">
+  <!-- Sticky Header -->
+  <div class="position-sticky top-0 bg-light border-bottom shadow-sm py-2 px-3 d-flex flex-wrap justify-content-between align-items-center" style="z-index:1031;">
+    <div class="d-flex flex-column flex-md-row align-items-start align-items-md-center gap-2">
+      <a href="{{ url_for('index') }}" class="btn btn-link text-decoration-none p-0 text-muted">
+        <i class="bi bi-arrow-left-circle"></i> Back to Links
+      </a>
+      <span class="fw-semibold text-dark small">
+        Reviewing sentences from:
+        <a href="{{ link_url }}" target="_blank" class="text-decoration-none text-primary">{{ link_url }}</a>
+      </span>
+    </div>
 
-  <!-- Status filter -->
-  <label for="status" class="mb-0">Filter:</label>
-  <select name="status" id="status" class="form-select form-select-sm" style="max-width:150px;"
-          onchange="this.form.submit()">
-    <option value="" {% if not status_filter %}selected{% endif %}>All</option>
-    <option value="new" {% if status_filter=='new' %}selected{% endif %}>New</option>
-    <option value="reviewed" {% if status_filter=='reviewed' %}selected{% endif %}>Reviewed</option>
-    <option value="rejected" {% if status_filter=='rejected' %}selected{% endif %}>Rejected</option>
-  </select>
+    <div class="d-flex align-items-center gap-2 mt-2 mt-md-0">
+      <label class="text-muted small mb-0">Rows / Page:</label>
+      <select id="page_size" class="form-select form-select-sm w-auto" onchange="changePageSize()">
+        {% for size in [10, 25, 50, 100] %}
+          <option value="{{ size }}" {% if size == page_size %}selected{% endif %}>{{ size }}</option>
+        {% endfor %}
+      </select>
 
-  <!-- Page size -->
-  <label for="page_size" class="mb-0">Rows per page:</label>
-  <select name="page_size" id="page_size" class="form-select form-select-sm" style="max-width:100px;"
-          onchange="this.form.submit()">
-    {% for size in [10,25,50,100] %}
-      <option value="{{ size }}" {% if page_size|int == size %}selected{% endif %}>{{ size }}</option>
-    {% endfor %}
-  </select>
-</form>
+      <label class="text-muted small mb-0 ms-2">Status:</label>
+      <select id="status_filter" class="form-select form-select-sm w-auto" onchange="changeStatusFilter()">
+        <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All</option>
+        <option value="new" {% if status_filter == 'new' %}selected{% endif %}>New</option>
+        <option value="reviewed" {% if status_filter == 'reviewed' %}selected{% endif %}>Reviewed</option>
+        <option value="rejected" {% if status_filter == 'rejected' %}selected{% endif %}>Rejected</option>
+      </select>
+    </div>
+  </div>
 
-<!-- Top action buttons -->
-<div class="mb-3">
-  <button id="mark-reviewed" class="btn btn-success btn-sm">Mark Reviewed</button>
-  <button id="mark-rejected" class="btn btn-warning btn-sm">Mark Rejected</button>
-  <button id="mark-new" class="btn btn-secondary btn-sm">Mark New</button>
-  <button id="delete-selected" class="btn btn-danger btn-sm">Delete Selected</button>
-</div>
-
-<form id="sentences-form">
-  <table class="table table-bordered">
-    <thead class="table-light">
-      <tr>
-        <th><input id="select-all-top" type="checkbox"></th>
-        <th>Sentence</th>
-        <th style="width:220px;">Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% if sentences %}
-      {% for s in sentences %}
-        <tr data-sid="{{ s.id }}">
-          <td class="align-middle text-center">
-            <input class="row-checkbox" type="checkbox" value="{{ s.id }}">
+  <!-- Sentence Table -->
+  <div class="table-responsive shadow-sm border rounded bg-white mt-2">
+    <table class="table table-sm align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="text-center" style="width:2%;">
+            <input type="checkbox" id="select_all">
+          </th>
+          <th>Sentence</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sentences %}
+        <tr data-id="{{ s.id }}">
+          <td class="text-center align-top">
+            <input type="checkbox" class="select-sentence" value="{{ s.id }}">
           </td>
           <td>
-            <div class="mb-1">
-              {% if s.status == 'reviewed' %}
-                <span class="badge bg-success">Reviewed</span>
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              {% if s.status == 'new' %}
+                <span class="badge bg-secondary text-light">New</span>
+              {% elif s.status == 'reviewed' %}
+                <span class="badge bg-success text-light">Reviewed</span>
               {% elif s.status == 'rejected' %}
                 <span class="badge bg-warning text-dark">Rejected</span>
               {% else %}
-                <span class="badge bg-secondary">New</span>
+                <span class="badge bg-light text-dark">{{ s.status }}</span>
               {% endif %}
-              <small class="text-muted ms-2">id: {{ s.id }}</small>
             </div>
-            <textarea class="form-control sentence-text" data-sid="{{ s.id }}" {% if s.status=='reviewed' %}disabled{% endif %}>{{ s.sentence }}</textarea>
-            <div class="form-text">Insert <code>#$#</code> to split (only New/Rejected).</div>
-          </td>
-          <td>
-            <div class="d-grid gap-2">
-              <button type="button" class="btn btn-primary btn-sm save-btn" data-sid="{{ s.id }}" {% if s.status=='reviewed' %}disabled{% endif %}>Save</button>
-              <button type="button" class="btn btn-danger btn-sm delete-btn" data-sid="{{ s.id }}" {% if s.status=='reviewed' %}disabled{% endif %}>Delete</button>
+
+            <textarea
+              class="form-control form-control-sm sentence-edit {% if s.status == 'reviewed' %}bg-light text-muted{% endif %}"
+              rows="2"
+              data-id="{{ s.id }}"
+              {% if s.status == 'reviewed' %}readonly title="Reviewed sentences cannot be edited."{% endif %}
+            >{{ s.sentence }}</textarea>
+
+            <!-- Inline Actions -->
+            <div class="d-flex align-items-center gap-2 mt-2">
+              {% if s.status in ['new', 'rejected'] %}
+              <!-- Save now appears first -->
+              <button class="btn btn-sm btn-outline-secondary btn-save" title="Save Sentence">
+                <i class="bi bi-save"></i>
+              </button>
+              {% endif %}
+
+              <select
+                class="form-select form-select-sm domain-select {% if s.status == 'reviewed' %}bg-light text-muted{% endif %}"
+                data-id="{{ s.id }}"
+                {% if s.status == 'reviewed' %}disabled title="Domain cannot be changed for reviewed sentences."{% endif %}
+              >
+                {# Put Untagged option first always for visibility #}
+                <option value="untagged"
+                  class="text-muted fst-italic"
+                  {% if not s.domain_id or s.domain_id == 0 %}selected{% endif %}
+                >
+                  Untagged
+                </option>
+
+                {# Then list all actual domains #}
+                {% for d in domain_options %}
+                  <option value="{{ d.id }}" {% if d.id == s.domain_id %}selected{% endif %}>
+                    {{ d.name }}
+                  </option>
+                {% endfor %}
+              </select>
+
+
+              {% if s.status in ['new', 'rejected'] %}
+              <button class="btn btn-sm btn-outline-secondary btn-delete" title="Delete Sentence">
+                <i class="bi bi-trash"></i>
+              </button>
+              {% else %}
+              <button class="btn btn-sm btn-outline-secondary" disabled title="Cannot modify reviewed sentence">
+                <i class="bi bi-lock"></i>
+              </button>
+              {% endif %}
             </div>
           </td>
         </tr>
-      {% endfor %}
-    {% else %}
-      <tr>
-        <td colspan="3" class="text-center text-muted">No sentences found for this filter.</td>
-      </tr>
-    {% endif %}
-    </tbody>
-    <tfoot class="table-light">
-      <tr>
-        <th><input id="select-all-bottom" type="checkbox"></th>
-        <th colspan="2">Select All</th>
-      </tr>
-    </tfoot>
-  </table>
-</form>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 
-<!-- Bottom action buttons -->
-<div class="mb-3">
-  <button id="mark-reviewed-bottom" class="btn btn-success btn-sm">Mark Reviewed</button>
-  <button id="mark-rejected-bottom" class="btn btn-warning btn-sm">Mark Rejected</button>
-  <button id="mark-new-bottom" class="btn btn-secondary btn-sm">Mark New</button>
-  <button id="delete-selected-bottom" class="btn btn-danger btn-sm">Delete Selected</button>
-</div>
+  <div style="height:90px;"></div>
 
-<!-- Filter + Page size (BOTTOM) -->
-<form method="get" class="mt-3 mb-3 d-flex align-items-center gap-3">
-  <input type="hidden" name="page" value="{{ page }}">
-  <label for="status-bottom" class="mb-0">Filter:</label>
-  <select name="status" id="status-bottom" class="form-select form-select-sm"
-          style="max-width:150px;" onchange="this.form.submit()">
-    <option value="" {% if not status_filter %}selected{% endif %}>All</option>
-    <option value="new" {% if status_filter=='new' %}selected{% endif %}>New</option>
-    <option value="reviewed" {% if status_filter=='reviewed' %}selected{% endif %}>Reviewed</option>
-    <option value="rejected" {% if status_filter=='rejected' %}selected{% endif %}>Rejected</option>
-  </select>
+  <!-- Sticky Footer -->
+  <div class="position-fixed bottom-0 start-0 end-0 bg-light border-top shadow-sm py-2 px-3 d-flex flex-wrap justify-content-between align-items-center" style="z-index:1030;">
 
-  <label for="page_size-bottom" class="mb-0">Rows per page:</label>
-  <select name="page_size" id="page_size-bottom" class="form-select form-select-sm"
-          style="max-width:100px;" onchange="this.form.submit()">
-    {% for size in [10,25,50,100] %}
-      <option value="{{ size }}" {% if page_size|int == size %}selected{% endif %}>{{ size }}</option>
-    {% endfor %}
-  </select>
-</form>
+    <!-- Left: Pagination (Prev) -->
+    <div>
+      {% if page > 1 %}
+      <button class="btn btn-outline-secondary btn-sm" onclick="goToPage({{ page - 1 }})">
+        <i class="bi bi-chevron-left"></i> Previous
+      </button>
+      {% endif %}
+    </div>
 
-<nav aria-label="Page navigation">
-  <ul class="pagination">
-    {% if page > 1 %}
-      <li class="page-item">
-        <a class="page-link"
-           href="{{ url_for('view_link', link_id=link_id, page=page-1, status=status_filter or '', page_size=page_size) }}">
-          Previous
-        </a>
-      </li>
-    {% endif %}
-    <li class="page-item disabled"><span class="page-link">Page {{page}} / {{total_pages}}</span></li>
-    {% if page < total_pages %}
-      <li class="page-item">
-        <a class="page-link"
-           href="{{ url_for('view_link', link_id=link_id, page=page+1, status=status_filter or '', page_size=page_size) }}">
-          Next
-        </a>
-      </li>
-    {% endif %}
-  </ul>
-</nav>
+    <!-- Center: Bulk Actions -->
+    <div class="d-flex flex-wrap align-items-center justify-content-center gap-2 text-center">
+      <span class="text-muted small">Bulk actions on selected sentences:</span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="updateStatus('new')">
+        <i class="bi bi-arrow-counterclockwise"></i> Mark as New
+      </button>
+      <button class="btn btn-sm btn-outline-success" onclick="updateStatus('reviewed')">
+        <i class="bi bi-check2-circle"></i> Mark as Reviewed
+      </button>
+      <button class="btn btn-sm btn-outline-warning" onclick="updateStatus('rejected')">
+        <i class="bi bi-exclamation-circle"></i> Mark as Rejected
+      </button>
+      <button class="btn btn-sm btn-outline-danger" onclick="deleteSelected()">
+        <i class="bi bi-trash"></i> Delete Selected
+      </button>
+    </div>
 
-<!-- Sticky footer action bar -->
-<div id="action-footer" class="bg-light border-top p-2 d-flex justify-content-around align-items-center"
-     style="position: fixed; bottom: 0; left: 0; right: 0; z-index: 1000;">
-  <button id="mark-reviewed-footer" class="btn btn-sm btn-success" title="Mark Reviewed">
-    <i class="bi bi-check-circle"></i>
-  </button>
-  <button id="mark-rejected-footer" class="btn btn-sm btn-warning" title="Mark Rejected">
-    <i class="bi bi-x-circle"></i>
-  </button>
-  <button id="mark-new-footer" class="btn btn-sm btn-secondary" title="Mark New">
-    <i class="bi bi-plus-circle"></i>
-  </button>
-  <button id="delete-selected-footer" class="btn btn-sm btn-danger" title="Delete Selected">
-    <i class="bi bi-trash"></i>
-  </button>
+    <!-- Right: Pagination (Next + Page No) -->
+    <div class="d-flex align-items-center gap-2">
+      <span class="text-muted small">Page {{ page }}</span>
+      {% if sentences|length >= page_size %}
+      <button class="btn btn-outline-secondary btn-sm" onclick="goToPage({{ page + 1 }})">
+        Next <i class="bi bi-chevron-right"></i>
+      </button>
+      {% endif %}
+    </div>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-async function postJSON(url, body) {
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body)
-  });
-  return resp.json();
+function changeStatusFilter() {
+  const status = document.getElementById("status_filter").value;
+  const params = new URLSearchParams(window.location.search);
+  params.set("status", status);
+  window.location.search = params.toString();
 }
-
-// Select-all sync
-function toggleSelectAll(masterId) {
-  const master = document.getElementById(masterId);
-  master.addEventListener('change', function() {
-    const checked = this.checked;
-    document.querySelectorAll('.row-checkbox').forEach(cb => cb.checked = checked);
-    // sync both checkboxes
-    if (masterId === 'select-all-top') {
-      document.getElementById('select-all-bottom').checked = checked;
-    } else {
-      document.getElementById('select-all-top').checked = checked;
+function changePageSize() {
+  const size = document.getElementById("page_size").value;
+  const params = new URLSearchParams(window.location.search);
+  params.set("page_size", size);
+  window.location.search = params.toString();
+}
+function goToPage(p) {
+  const params = new URLSearchParams(window.location.search);
+  params.set("page", p);
+  window.location.search = params.toString();
+}
+document.getElementById("select_all").addEventListener("change", e => {
+  document.querySelectorAll(".select-sentence").forEach(chk => chk.checked = e.target.checked);
+});
+document.querySelectorAll(".btn-save").forEach(btn => {
+  btn.addEventListener("click", async e => {
+    const row = e.target.closest("tr");
+    const sid = row.dataset.id;
+    const text = row.querySelector(".sentence-edit").value;
+    const res = await fetch("/api/update_sentence", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id: sid, sentence: text})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.classList.replace("btn-outline-secondary", "btn-outline-success");
+      setTimeout(() => btn.classList.replace("btn-outline-success", "btn-outline-secondary"), 1200);
     }
   });
-}
-toggleSelectAll('select-all-top');
-toggleSelectAll('select-all-bottom');
-
-// Save button handler
-document.querySelectorAll('.save-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const sid = Number(btn.dataset.sid);
-    const ta = document.querySelector('textarea[data-sid="'+sid+'"]');
-    const res = await postJSON('{{ url_for("api_update_sentence") }}', { id: sid, sentence: ta.value.trim() });
-    if (res.ok) location.reload();
-    else alert('Update failed: ' + (res.error || 'unknown'));
+});
+document.querySelectorAll(".btn-delete").forEach(btn => {
+  btn.addEventListener("click", async e => {
+    const row = e.target.closest("tr");
+    const sid = row.dataset.id;
+    if (!confirm("Delete this sentence?")) return;
+    const res = await fetch("/api/delete_sentences", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ids: [sid]})
+    });
+    const data = await res.json();
+    if (data.ok) row.remove();
+  });
+});
+document.querySelectorAll(".domain-select").forEach(sel => {
+  sel.addEventListener("change", async e => {
+    const sid = e.target.dataset.id;
+    const did = e.target.value;
+    const res = await fetch("/api/update_domain", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({sentence_id: sid, domain_id: did})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      sel.classList.add("border-success");
+      // Update label visually if backend confirms domain
+      if (data.domain_name) {
+        const badge = sel.closest("td").querySelector(".badge");
+        if (badge && badge.innerText === "Untagged") {
+          badge.className = "badge bg-secondary text-light";
+          badge.innerText = "New"; // revert status label if needed
+        }
+      }
+      setTimeout(() => sel.classList.remove("border-success"), 1200);
+    } else {
+      alert("Failed to update domain: " + (data.error || "Unknown error"));
+    }
   });
 });
 
-// Delete button handler
-document.querySelectorAll('.delete-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const sid = Number(btn.dataset.sid);
-    if (!confirm('Delete id '+sid+'?')) return;
-    const res = await postJSON('{{ url_for("api_delete_sentences") }}', { ids: [sid] });
-    if (res.ok) location.reload();
-    else alert('Delete failed');
+function hasUntaggedSelected() {
+  const rows = [...document.querySelectorAll(".select-sentence:checked")];
+  return rows.some(r => {
+    const sel = r.closest("tr").querySelector(".domain-select");
+    return sel && (sel.value === "untagged" || sel.value === "" || sel.value === null);
   });
-});
+}
+async function updateStatus(status) {
+  const selected = [...document.querySelectorAll(".select-sentence:checked")].map(x => x.value);
+  if (!selected.length) return alert("No sentences selected.");
 
-// Bulk status changes
-async function changeStatusForChecked(status) {
-  const checked = Array.from(document.querySelectorAll('.row-checkbox:checked')).map(i => Number(i.value));
-  if (!checked.length) { alert('No sentences selected'); return; }
-  const res = await postJSON('{{ url_for("api_change_status") }}', { ids: checked, status: status });
-  if (res.ok) location.reload();
-  else alert('Status change failed');
+  // Check for untagged rows when marking as reviewed
+  if (status === "reviewed") {
+    const untaggedRows = [];
+    document.querySelectorAll(".select-sentence:checked").forEach(chk => {
+      const row = chk.closest("tr");
+      const sel = row.querySelector(".domain-select");
+      if (sel && (sel.value === "untagged" || !sel.value)) {
+        untaggedRows.push(row);
+        row.classList.add("border", "border-warning", "border-3");
+        setTimeout(() => row.classList.remove("border", "border-warning", "border-3"), 3000);
+      }
+    });
+    if (untaggedRows.length > 0) {
+      untaggedRows[0].scrollIntoView({behavior: "smooth", block: "center"});
+      alert(`Cannot mark as Reviewed: ${untaggedRows.length} sentence(s) are 'Untagged'. Assign a domain first.`);
+      return;
+    }
+  }
+
+  const res = await fetch("/api/update_status_bulk", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ids: selected, status})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    window.location.reload();
+  } else {
+    alert(data.error || "Failed to update statuses");
+  }
 }
 
-// Top buttons
-document.getElementById('mark-reviewed').addEventListener('click', () => changeStatusForChecked('reviewed'));
-document.getElementById('mark-rejected').addEventListener('click', () => changeStatusForChecked('rejected'));
-document.getElementById('mark-new').addEventListener('click', () => changeStatusForChecked('new'));
-document.getElementById('delete-selected').addEventListener('click', () => changeStatusForChecked('delete'));
-
-// Bottom buttons reuse
-document.getElementById('mark-reviewed-bottom').addEventListener('click', () => changeStatusForChecked('reviewed'));
-document.getElementById('mark-rejected-bottom').addEventListener('click', () => changeStatusForChecked('rejected'));
-document.getElementById('mark-new-bottom').addEventListener('click', () => changeStatusForChecked('new'));
-document.getElementById('delete-selected-bottom').addEventListener('click', () => changeStatusForChecked('delete'));
-
-// Sticky footer buttons
-document.getElementById('mark-reviewed-footer').addEventListener('click', () => changeStatusForChecked('reviewed'));
-document.getElementById('mark-rejected-footer').addEventListener('click', () => changeStatusForChecked('rejected'));
-document.getElementById('mark-new-footer').addEventListener('click', () => changeStatusForChecked('new'));
-document.getElementById('delete-selected-footer').addEventListener('click', () => changeStatusForChecked('delete'));
-
+async function deleteSelected() {
+  const selected = [...document.querySelectorAll(".select-sentence:checked")].map(x => x.value);
+  if (!selected.length) return alert("No sentences selected.");
+  if (!confirm("Delete selected sentences?")) return;
+  const res = await fetch("/api/delete_sentences", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ids: selected})
+  });
+  const data = await res.json();
+  if (data.ok) window.location.reload();
+}
 </script>
 {% endblock %}

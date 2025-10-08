@@ -17,6 +17,10 @@ def get_conn():
     return sqlite3.connect(DB_FILE)
 
 
+# ==========================================================
+# --- ROUTES ---
+# ==========================================================
+
 @app.route("/")
 def index():
     page = int(request.args.get("page", 1))
@@ -71,12 +75,11 @@ def index():
     )
 
 
-
 @app.route("/link/<int:link_id>")
 def view_link(link_id):
     page = int(request.args.get("page", 1))
-    page_size = int(request.args.get("page_size", PAGE_SIZE))  # <-- dynamic page size
-    status_filter = request.args.get("status", "new")  # can be None, 'new', 'reviewed', 'rejected'
+    page_size = int(request.args.get("page_size", PAGE_SIZE))
+    status_filter = request.args.get("status", "new")
     offset = (page - 1) * page_size
 
     conn = get_conn()
@@ -99,78 +102,85 @@ def view_link(link_id):
     cur.execute(f"SELECT COUNT(*) FROM staging_sentences {where_clause}", params)
     total = cur.fetchone()[0] or 0
 
-    # Fetch sentences ASC order
+    # Fetch sentences
     cur.execute(f"""
-        SELECT id, sentence, status FROM staging_sentences
+        SELECT s.id, s.sentence, s.status,
+            COALESCE(d.id, 0) as domain_id,
+            COALESCE(d.name, 'Untagged') as domain_name
+        FROM staging_sentences s
+        LEFT JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+        LEFT JOIN domain d ON d.id = sd.domain_id
         {where_clause}
-        ORDER BY id ASC
+        ORDER BY s.id ASC
         LIMIT ? OFFSET ?
     """, params + [page_size, offset])
     rows = cur.fetchall()
-    sentences = [{"id": r[0], "sentence": r[1], "status": r[2] or "new"} for r in rows]
+
+    sentences = [{
+        "id": r[0],
+        "sentence": r[1],
+        "status": r[2] or "new",
+        "domain_id": r[3],
+        "domain_name": r[4] or "Untagged"
+    } for r in rows]
+
+    # Domain dropdown
+    cur.execute("SELECT id, name FROM domain ORDER BY name")
+    domain_options = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
     conn.close()
 
-    return render_link_sentences_page(link_id, link_url, sentences, page, page_size, total, status_filter)
+    return render_link_sentences_page(
+        link_id, link_url, sentences, page, page_size,
+        total, status_filter, domain_options
+    )
 
-
+# ==========================================================
+# --- API ROUTES ---
+# ==========================================================
 
 @app.route("/api/update_sentence", methods=["POST"])
 def api_update_sentence():
-    """
-    - If payload contains "#$#" the text will be split into multiple sentences.
-    - Splitting or editing allowed only for 'new' or 'rejected' sentences.
-    - If split: delete original row, insert parts (status='new' for inserted parts).
-    - If normal edit: update the row (only allowed for new/rejected).
-    """
     payload = request.get_json(force=True)
     sid = payload.get("id")
     new_text = payload.get("sentence", "").strip()
-    if not sid or new_text == "":
+    if not sid or not new_text:
         return jsonify({"ok": False, "error": "invalid payload"}), 400
 
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("SELECT link_id, status FROM staging_sentences WHERE id=?", (sid,))
     row = cur.fetchone()
     if not row:
         conn.close()
         return jsonify({"ok": False, "error": "not found"}), 404
-    link_id, status = row[0], (row[1] or "new")
 
-    # Only allow edits/splits for 'new' or 'rejected'
+    link_id, status = row
+    status = status or "new"
+
     if status not in ("new", "rejected"):
         conn.close()
-        return jsonify({"ok": False, "error": "cannot edit reviewed sentence"}, 403)
+        return jsonify({"ok": False, "error": "cannot edit reviewed sentence"}), 403
 
-    # If split token exists, split into multiple parts
     if "#$#" in new_text:
-        parts = [s.strip() for s in new_text.split("#$#") if s.strip()]
+        parts = [p.strip() for p in new_text.split("#$#") if p.strip()]
         if not parts:
             conn.close()
             return jsonify({"ok": False, "error": "invalid split parts"}), 400
-
-        # Delete original
         cur.execute("DELETE FROM staging_sentences WHERE id=?", (sid,))
-        # Insert parts with status='new'
-        for part in parts:
+        for p in parts:
             cur.execute(
-                "INSERT INTO staging_sentences(link_id, sentence, status) VALUES (?, ?, ?)",
-                (link_id, part, "new"),
+                "INSERT INTO staging_sentences(link_id, sentence, status) VALUES (?, ?, 'new')",
+                (link_id, p),
             )
         conn.commit()
         conn.close()
         return jsonify({"ok": True, "split": True, "parts": parts})
 
-    # Normal update (no split)
     cur.execute("UPDATE staging_sentences SET sentence=? WHERE id=?", (new_text, sid))
     conn.commit()
     updated = cur.rowcount
     conn.close()
-    if updated:
-        return jsonify({"ok": True, "split": False})
-    else:
-        return jsonify({"ok": False, "error": "not found"}), 404
+    return jsonify({"ok": bool(updated)})
 
 
 @app.route("/api/delete_sentences", methods=["POST"])
@@ -180,50 +190,134 @@ def api_delete_sentences():
     if not isinstance(ids, list) or not ids:
         return jsonify({"ok": False, "error": "invalid ids"}), 400
 
-    # Only allow deletion of new or rejected sentences; reviewed cannot be deleted
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, status FROM staging_sentences WHERE id IN ({seq})".format(seq=','.join(['?']*len(ids))), ids)
+    cur.execute(
+        f"SELECT id, status FROM staging_sentences WHERE id IN ({','.join(['?']*len(ids))})",
+        ids
+    )
     rows = cur.fetchall()
     allowed = [r[0] for r in rows if (r[1] or "new") in ("new", "rejected")]
     if not allowed:
         conn.close()
         return jsonify({"ok": False, "error": "no deletable ids"}), 403
 
-    cur.execute("DELETE FROM staging_sentences WHERE id IN ({seq})".format(seq=','.join(['?']*len(allowed))), allowed)
+    cur.execute(
+        f"DELETE FROM staging_sentences WHERE id IN ({','.join(['?']*len(allowed))})",
+        allowed
+    )
     deleted = cur.rowcount
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "deleted": deleted})
 
 
-@app.route("/api/change_status", methods=["POST"])
-def api_change_status():
+@app.route("/api/update_status_bulk", methods=["POST"])
+def api_update_status_bulk():
     """
     Payload: { "ids": [1,2,3], "status": "reviewed"|"rejected"|"new" }
-    Only 'reviewed' or 'rejected' are typical moves; allow 'new' to roll back.
+    Prevents marking as 'reviewed' if any sentence is untagged.
     """
     payload = request.get_json(force=True)
     ids = payload.get("ids", [])
     status = payload.get("status", "").strip()
-    if not isinstance(ids, list) or status not in ("new", "reviewed", "rejected"):
+
+    if not ids or not isinstance(ids, list) or status not in ("new", "reviewed", "rejected"):
         return jsonify({"ok": False, "error": "invalid payload"}), 400
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # 🚫 Prevent review if any sentence is untagged (no domain)
+        if status == "reviewed":
+            placeholders = ",".join("?" for _ in ids)
+            cur.execute(f"""
+                SELECT COUNT(*) FROM staging_sentences s
+                LEFT JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+                WHERE s.id IN ({placeholders}) AND sd.domain_id IS NULL
+            """, ids)
+            untagged_count = cur.fetchone()[0] or 0
+            if untagged_count > 0:
+                conn.close()
+                return jsonify({
+                    "ok": False,
+                    "error": f"{untagged_count} sentence(s) are untagged. Assign a domain before marking as reviewed."
+                }), 400
+
+        # ✅ Perform status update
+        placeholders = ",".join("?" for _ in ids)
+        cur.execute(
+            f"UPDATE staging_sentences SET status=? WHERE id IN ({placeholders})",
+            [status] + ids,
+        )
+        updated = cur.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "updated": updated})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/update_domain", methods=["POST"])
+def api_update_domain():
+    payload = request.get_json(force=True)
+    sid = payload.get("sentence_id")
+    did = payload.get("domain_id")
+
+    if not sid:
+        return jsonify({"ok": False, "error": "missing sentence_id"}), 400
 
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE staging_sentences SET status=? WHERE id IN ({seq})".format(seq=','.join(['?']*len(ids))), [status] + ids)
-    updated = cur.rowcount
+
+    # Handle explicit untagged
+    if not did or did == "untagged":
+        cur.execute("DELETE FROM staging_sentence_domain WHERE sentence_id=?", (sid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "untagged": True, "domain_name": "Untagged"})
+
+    # Convert to int safely
+    try:
+        did = int(did)
+    except ValueError:
+        conn.close()
+        return jsonify({"ok": False, "error": "invalid domain id"}), 400
+
+    # Validate IDs
+    cur.execute("SELECT 1 FROM staging_sentences WHERE id=?", (sid,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"ok": False, "error": "invalid sentence"}), 404
+
+    cur.execute("SELECT name FROM domain WHERE id=?", (did,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"ok": False, "error": "invalid domain"}), 404
+    domain_name = row[0]
+
+    # Update / insert mapping
+    cur.execute("""
+        INSERT OR REPLACE INTO staging_sentence_domain (sentence_id, domain_id, source)
+        VALUES (?, ?, 'manual_review')
+    """, (sid, did))
+
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "updated": updated})
+    return jsonify({"ok": True, "domain_id": did, "domain_name": domain_name})
 
 
+# ==========================================================
+# --- ENTRYPOINT ---
+# ==========================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sentence Review Web UI")
     parser.add_argument("--config", required=True, help="Path to JSON config file")
     args = parser.parse_args()
 
-    # Load config
     with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
@@ -231,14 +325,13 @@ if __name__ == "__main__":
     review_conf = config.get("review", {})
     PAGE_SIZE = review_conf.get("page_size", 20)
 
-    # Logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler(review_conf.get("log_file", "review.log"), encoding="utf-8"),
-            logging.StreamHandler()
-        ]
+            logging.StreamHandler(),
+        ],
     )
 
     port = review_conf.get("port", 5000)

@@ -16,7 +16,7 @@ def render_links_page(links, page, page_size, total_links, total_sentences, stat
     )
 
 
-def render_link_sentences_page(link_id, link_url, sentences, page, page_size, total, status_filter=None):
+def render_link_sentences_page(link_id, link_url, sentences, page, page_size, total, status_filter=None, domain_options=None):
     total_pages = max(1, (total + page_size - 1) // page_size)
     start = (page - 1) * page_size + 1 if total > 0 else 0
     end = min(total, page * page_size)
@@ -25,5 +25,5 @@ def render_link_sentences_page(link_id, link_url, sentences, page, page_size, to
                            sentences=sentences, page=page, page_size=page_size,
                            total=total, total_pages=total_pages,
                            start=start, end=end,
-                           status_filter=status_filter)
+                           status_filter=status_filter, domain_options=domain_options or [])
 
