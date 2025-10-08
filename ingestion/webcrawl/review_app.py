@@ -45,6 +45,21 @@ def index():
     status_rows = cur.fetchall()
     status_counts = {row[0]: row[1] for row in status_rows}
 
+    cur.execute("""
+        SELECT COALESCE(d.name, 'Untagged') AS domain, COUNT(s.id)
+        FROM staging_sentences s
+        LEFT JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+        LEFT JOIN domain d ON d.id = sd.domain_id
+        WHERE s.status = 'reviewed'
+        GROUP BY COALESCE(d.name, 'Untagged')
+        ORDER BY COUNT(s.id) DESC
+    """)
+    domain_rows = cur.fetchall()
+    domain_counts = {row[0]: row[1] for row in domain_rows}
+
+    if not domain_rows:
+        domain_counts = {"(no reviewed sentences yet)": 0}
+
     # Paginated links
     cur.execute(f"""
         SELECT l.id, l.url,
@@ -71,7 +86,8 @@ def index():
     } for r in rows]
     return render_links_page(
         links, page, PAGE_SIZE, total_links,
-        total_sentences, status_counts
+        total_sentences, status_counts,
+        domain_counts=domain_counts
     )
 
 
@@ -111,9 +127,10 @@ def view_link(link_id):
         LEFT JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
         LEFT JOIN domain d ON d.id = sd.domain_id
         {where_clause}
-        ORDER BY s.id ASC
+        ORDER BY s.created_at ASC, s.id ASC
         LIMIT ? OFFSET ?
     """, params + [page_size, offset])
+
     rows = cur.fetchall()
 
     sentences = [{

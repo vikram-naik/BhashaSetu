@@ -1,7 +1,7 @@
 # ingestion/webcrawl/views.py
 from flask import render_template
 
-def render_links_page(links, page, page_size, total_links, total_sentences, status_counts):
+def render_links_page(links, page, page_size, total_links, total_sentences, status_counts, domain_counts):
     total_pages = max(1, (total_links + page_size - 1) // page_size)
     start = (page - 1) * page_size + 1 if total_links > 0 else 0
     end = min(total_links, page * page_size)
@@ -12,7 +12,8 @@ def render_links_page(links, page, page_size, total_links, total_sentences, stat
         total_links=total_links, total_pages=total_pages,
         start=start, end=end,
         total_sentences=total_sentences,
-        status_counts=status_counts
+        status_counts=status_counts,
+        domain_counts=domain_counts
     )
 
 

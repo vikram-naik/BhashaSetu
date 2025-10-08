@@ -3,14 +3,37 @@
 {% block content %}
 <h1 class="mb-3">Sentence Review — Links</h1>
 
-<div class="alert alert-info">
-  <strong>{{ total_sentences }}</strong> sentences across <strong>{{ total_links }}</strong> links.
-  <div class="mt-2">
-    <span class="badge bg-secondary">New: {{ status_counts.get('new',0) }}</span>
-    <span class="badge bg-success">Reviewed: {{ status_counts.get('reviewed',0) }}</span>
-    <span class="badge bg-warning text-dark">Rejected: {{ status_counts.get('rejected',0) }}</span>
+<div class="p-3 mb-3 rounded shadow-sm bg-info-subtle border border-info-subtle">
+  <h5 class="mb-1 fw-semibold">📊 {{ total_sentences }} sentences across {{ total_links }} links</h5>
+  <div class="d-flex flex-wrap gap-3 mt-2">
+    <span class="badge bg-secondary text-light px-3 py-2">New: {{ status_counts.get('new', 0) }}</span>
+    <span class="badge bg-success text-light px-3 py-2">Reviewed: {{ status_counts.get('reviewed', 0) }}</span>
+    <span class="badge bg-warning text-dark px-3 py-2">Rejected: {{ status_counts.get('rejected', 0) }}</span>
   </div>
 </div>
+
+
+{% if domain_counts %}
+<div class="mt-4">
+  <h6 class="fw-semibold text-uppercase text-muted mb-2">
+    <i class="bi bi-diagram-3 me-1"></i> Domain Distribution (Reviewed Sentences Only)
+  </h6>
+
+  <div class="p-3 rounded shadow-sm bg-white border border-light-subtle">
+    <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-6 g-2">
+      {% for name, count in domain_counts.items() %}
+      <div class="col">
+        <div class="d-flex justify-content-between align-items-center border rounded p-2 small bg-light-subtle">
+          <span class="text-truncate fw-medium" title="{{ name }}">{{ name }}</span>
+          <span class="badge bg-primary-subtle text-dark ms-2">{{ count }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 
 <p class="text-muted">Showing links {{ start }}–{{ end }} of {{ total_links }}, page {{ page }} / {{ total_pages }}</p>
 
