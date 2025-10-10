@@ -45,6 +45,10 @@ def index():
     status_rows = cur.fetchall()
     status_counts = {row[0]: row[1] for row in status_rows}
 
+    # Ensure all expected keys are present
+    for key in ("new", "reviewed", "rejected", "duplicate"):
+        status_counts.setdefault(key, 0)
+
     cur.execute("""
         SELECT COALESCE(d.name, 'Untagged') AS domain, COUNT(s.id)
         FROM staging_sentences s
@@ -63,27 +67,32 @@ def index():
     # Paginated links
     cur.execute(f"""
         SELECT l.id, l.url,
-            COUNT(s.id) as total,
-            SUM(CASE WHEN COALESCE(s.status,'new')='new' THEN 1 ELSE 0 END) as new_count,
-            SUM(CASE WHEN s.status='reviewed' THEN 1 ELSE 0 END) as reviewed_count,
-            SUM(CASE WHEN s.status='rejected' THEN 1 ELSE 0 END) as rejected_count
+            COUNT(s.id) AS total,
+            SUM(CASE WHEN s.status='new' THEN 1 ELSE 0 END) AS new_count,
+            SUM(CASE WHEN s.status='reviewed' THEN 1 ELSE 0 END) AS reviewed,
+            SUM(CASE WHEN s.status='rejected' THEN 1 ELSE 0 END) AS rejected,
+            SUM(CASE WHEN s.status='duplicate' THEN 1 ELSE 0 END) AS duplicate
         FROM links l
         LEFT JOIN staging_sentences s ON s.link_id = l.id
-        GROUP BY l.id
+        GROUP BY l.id, l.url
         ORDER BY new_count DESC, l.id DESC
         LIMIT ? OFFSET ?
     """, (PAGE_SIZE, offset))
     rows = cur.fetchall()
     conn.close()
 
-    links = [{
-        "id": r[0],
-        "url": r[1],
-        "total": r[2],
-        "new": r[3] or 0,
-        "reviewed": r[4] or 0,
-        "rejected": r[5] or 0
-    } for r in rows]
+    links = [
+        {
+            "id": row[0],
+            "url": row[1],
+            "total": row[2],
+            "new": row[3],
+            "reviewed": row[4],
+            "rejected": row[5],
+            "duplicate": row[6],
+        }
+        for row in rows
+    ]
     return render_links_page(
         links, page, PAGE_SIZE, total_links,
         total_sentences, status_counts,
@@ -110,7 +119,7 @@ def view_link(link_id):
     # Build SQL condition
     where_clause = "WHERE link_id=?"
     params = [link_id]
-    if status_filter in ("new", "reviewed", "rejected"):
+    if status_filter in ("new", "reviewed", "rejected", "duplicate"):
         where_clause += " AND status=?"
         params.append(status_filter)
 
@@ -214,7 +223,7 @@ def api_delete_sentences():
         ids
     )
     rows = cur.fetchall()
-    allowed = [r[0] for r in rows if (r[1] or "new") in ("new", "rejected")]
+    allowed = [r[0] for r in rows if (r[1] or "new") in ("new", "rejected", "duplicate")]
     if not allowed:
         conn.close()
         return jsonify({"ok": False, "error": "no deletable ids"}), 403

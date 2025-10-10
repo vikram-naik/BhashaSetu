@@ -30,6 +30,7 @@
         <option value="new" {% if status_filter == 'new' %}selected{% endif %}>New</option>
         <option value="reviewed" {% if status_filter == 'reviewed' %}selected{% endif %}>Reviewed</option>
         <option value="rejected" {% if status_filter == 'rejected' %}selected{% endif %}>Rejected</option>
+        <option value="duplicate" {% if status_filter == 'duplicate' %}selected{% endif %}>Duplicate</option>
       </select>
     </div>
   </div>
@@ -102,7 +103,7 @@
               </select>
 
 
-              {% if s.status in ['new', 'rejected'] %}
+              {% if s.status in ['new', 'rejected', 'duplicate'] %}
               <button class="btn btn-sm btn-outline-secondary btn-delete" title="Delete Sentence">
                 <i class="bi bi-trash"></i>
               </button>

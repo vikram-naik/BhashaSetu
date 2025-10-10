@@ -1,10 +1,13 @@
-import logging
 import random
 import time
 import re
 import requests
 import sqlite3
 import functools
+import logging
+import hashlib
+import unicodedata
+
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from .repositories import (
@@ -13,6 +16,7 @@ from .repositories import (
 )
 from .strategies import SentenceSplitterFactory, ProcessorFactory, ProcessorResult
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
 # Implicit attributes that every Page has by design
@@ -336,6 +340,7 @@ class SentenceProcessorVisitor(Visitor):
 # ---------------------------------------------------------
 # DB Visitor
 # ---------------------------------------------------------
+
 class DBVisitor(Visitor):
     consumes = ["page.url", "page.flags"]
     produces = ["page.flags.already_in_db"]
@@ -346,27 +351,86 @@ class DBVisitor(Visitor):
         init_db(self.conn)
         self.links = LinkRepository(self.conn)
         self.sentences = SentenceRepository(self.conn)
-        logging.info(f"[DBVisitor] Connected and initialized DB: {db_path}")
+        self._table_has_cache = {}
+        logger.info(f"[DBVisitor] Connected and initialized DB: {db_path}")
 
+    # ---------- helpers ----------
+    def _table_has_column(self, table: str, column: str) -> bool:
+        key = (table, column)
+        if key in self._table_has_cache:
+            return self._table_has_cache[key]
+        cur = self.conn.cursor()
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = [r[1] for r in cur.fetchall()]
+        exists = column in cols
+        self._table_has_cache[key] = exists
+        return exists
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        t = unicodedata.normalize("NFKC", text or "")
+        t = re.sub(r"\s+", " ", t.strip().lower())
+        return t
+
+    @classmethod
+    def _hash_text(cls, text: str) -> str:
+        norm = cls._normalize_text(text)
+        return hashlib.sha1(norm.encode("utf-8")).hexdigest()
+
+    def _insert_sentence_row(self, link_id: int, sentence: str, status: str = "new",
+                             hash_val: str = None, duplicate_of: int = None) -> int:
+        cur = self.conn.cursor()
+        cols = ["link_id", "sentence", "status"]
+        vals = [link_id, sentence, status]
+
+        if self._table_has_column("staging_sentences", "hash") and hash_val is not None:
+            cols.append("hash"); vals.append(hash_val)
+        if self._table_has_column("staging_sentences", "duplicate_of") and duplicate_of is not None:
+            cols.append("duplicate_of"); vals.append(duplicate_of)
+
+        placeholders = ",".join(["?"] * len(cols))
+        sql = f"INSERT INTO staging_sentences ({','.join(cols)}) VALUES ({placeholders})"
+        cur.execute(sql, tuple(vals))
+        self.conn.commit()
+        return cur.lastrowid
+
+    # ---------- lifecycle ----------
     def on_page_start(self, context):
         page = context.page
+        # root always processed to discover links
         if page.is_root:
             page.flags["already_in_db"] = False
-            context.log("[DBVisitor] Root page — always process for link discovery")
+            page.flags["skip_processing"] = False
+            context.log("[DBVisitor] Root page detected — always process for link discovery")
             return
 
         if self._url_exists(page.url):
             page.flags["already_in_db"] = True
             page.flags["skip_processing"] = True
-            context.log("[DBVisitor] URL already present in DB — skipping")
+            context.log("[DBVisitor] URL already present in DB — skipping downstream processing")
         else:
             page.flags["already_in_db"] = False
             page.flags["skip_processing"] = False
 
     def on_page_end(self, context):
         page = context.page
-        if page.is_root or page.flags.get("already_in_db"):
+
+        # Protocol: SentenceProcessorVisitor must have run and attached processed_results
+        if not hasattr(page, "processed_results"):
+            raise RuntimeError(
+                "[DBVisitor] Missing 'processed_results' on Page — ensure SentenceProcessorVisitor ran before DBVisitor."
+            )
+
+        # Root page: we still want to discover links, but do not insert sentences from root.
+        if page.is_root:
+            context.log("[DBVisitor] Root page processed — skipping DB insert of sentences")
             return
+
+        # If URL already in DB we skip insertion (we still want to farm new links from page)
+        if page.flags.get("already_in_db"):
+            context.log("[DBVisitor] Skipping DB insert — URL already exists")
+            return
+
         if page.should_skip() or not getattr(page, "processed_results", []):
             return
 
@@ -374,32 +438,77 @@ class DBVisitor(Visitor):
             link_id = self.links.insert(page.url)
             domain_repo = DomainRepository(self.conn)
             sentence_domain_repo = SentenceDomainRepository(self.conn)
+
+            inserted = 0
+            dup_count = 0
+
+            use_hash = self._table_has_column("staging_sentences", "hash")
+
             for r in getattr(page, "processed_results", []):
-                s = r.text
+                s = (r.text or "").strip()
+                if not s:
+                    continue
                 st = r.status or "new"
-                sentence_id = self.sentences.insert(link_id, s, st)
+
+                # ---------- duplicate detection ----------
+                if use_hash:
+                    h = self._hash_text(s)
+                    cur = self.conn.cursor()
+                    cur.execute("SELECT id FROM staging_sentences WHERE hash=? LIMIT 1", (h,))
+                    row = cur.fetchone()
+                    if row:
+                        # Found an earlier identical sentence (normalized->hash match)
+                        orig_id = row[0]
+                        # Insert a record marked as duplicate for audit, pointing to original.
+                        new_id = self._insert_sentence_row(link_id, s, status="duplicate",
+                                                           hash_val=h, duplicate_of=orig_id)
+                        dup_count += 1
+                        context.log(f"[DBVisitor] Duplicate (hash) -> sid={new_id}, orig={orig_id}", level=logging.DEBUG)
+                        continue
+                    else:
+                        # not a duplicate -> insert with hash
+                        new_id = self._insert_sentence_row(link_id, s, status=st, hash_val=h)
+                else:
+                    # fallback: exact-string check (backwards compatible)
+                    cur = self.conn.cursor()
+                    cur.execute("SELECT id FROM staging_sentences WHERE sentence=? LIMIT 1", (s,))
+                    row = cur.fetchone()
+                    if row:
+                        orig_id = row[0]
+                        new_id = self._insert_sentence_row(link_id, s, status="duplicate")
+                        dup_count += 1
+                        context.log(f"[DBVisitor] Duplicate (exact) -> sid={new_id}, orig={orig_id}", level=logging.DEBUG)
+                        continue
+                    else:
+                        new_id = self._insert_sentence_row(link_id, s, status=st)
+
+                # ---------- domain mapping (only for non-duplicate inserts) ----------
                 meta = getattr(r, "metadata", {}) or {}
                 domain_code = meta.get("domain_code", "misc")
                 domain_name = meta.get("domain_name", "Miscellaneous")
                 domain_id = domain_repo.get_or_create(domain_code, domain_name)
                 sentence_domain_repo.insert(
-                    sentence_id, domain_id,
+                    new_id,
+                    domain_id,
                     confidence=meta.get("confidence"),
                     source=meta.get("source", "rule_based")
                 )
+
+                inserted += 1
+
             self.conn.commit()
-            context.log(f"[DBVisitor] Inserted {len(page.sentences)} sentences with domain mappings")
+            context.log(f"[DBVisitor] Inserted={inserted}, duplicates_marked={dup_count}")
         except Exception as e:
             context.stats["errors"] += 1
-            context.log(f"[DBVisitor] Insert failed: {e}")
+            context.log(f"[DBVisitor] Insert failed: {e}", level=logging.ERROR)
 
-    def _url_exists(self, url):
+    def _url_exists(self, url: str) -> bool:
         cur = self.conn.cursor()
         cur.execute("SELECT 1 FROM links WHERE url=? LIMIT 1", (url,))
         return cur.fetchone() is not None
 
     def on_crawl_end(self, context):
-        if self.conn:
+        if getattr(self, "conn", None):
             try:
                 self.conn.close()
                 logging.info("[DBVisitor] Closed DB connection")
