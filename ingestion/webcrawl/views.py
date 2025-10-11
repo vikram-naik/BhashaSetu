@@ -26,5 +26,5 @@ def render_link_sentences_page(link_id, link_url, sentences, page, page_size, to
                            sentences=sentences, page=page, page_size=page_size,
                            total=total, total_pages=total_pages,
                            start=start, end=end,
-                           status_filter=status_filter, domain_options=domain_options or [])
+                           status_filter=status_filter, domain_options=domain_options or [], from_domain=False)
 

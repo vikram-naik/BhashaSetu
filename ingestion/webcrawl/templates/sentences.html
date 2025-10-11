@@ -7,13 +7,25 @@
   <!-- Sticky Header -->
   <div class="position-sticky top-0 bg-light border-bottom shadow-sm py-2 px-3 d-flex flex-wrap justify-content-between align-items-center" style="z-index:1031;">
     <div class="d-flex flex-column flex-md-row align-items-start align-items-md-center gap-2">
-      <a href="{{ url_for('index') }}" class="btn btn-link text-decoration-none p-0 text-muted">
-        <i class="bi bi-arrow-left-circle"></i> Back to Links
+      {% if from_domain %}
+      <a href="{{ url_for('index') }}" class="btn btn-link text-decoration-none ps-0">
+        <i class="bi bi-arrow-left"></i> Back to Domains
       </a>
+      {% else %}
+      <a href="{{ url_for('index') }}" class="btn btn-link text-decoration-none ps-0">
+        <i class="bi bi-arrow-left"></i> Back to Links
+      </a>
+      {% endif %}
+      {% if from_domain %}
+      <span class="fw-semibold text-dark small">
+        Reviwed Sentences for domain: {{domain_name}}
+      </span>
+      {% else %}
       <span class="fw-semibold text-dark small">
         Reviewing sentences from:
         <a href="{{ link_url }}" target="_blank" class="text-decoration-none text-primary">{{ link_url }}</a>
       </span>
+      {% endif %}
     </div>
 
     <div class="d-flex align-items-center gap-2 mt-2 mt-md-0">
@@ -84,7 +96,8 @@
               <select
                 class="form-select form-select-sm domain-select {% if s.status == 'reviewed' %}bg-light text-muted{% endif %}"
                 data-id="{{ s.id }}"
-                {% if s.status == 'reviewed' %}disabled title="Domain cannot be changed for reviewed sentences."{% endif %}
+                {% if not from_domain and s.status in ['reviewed'] %}disabled{% endif %} 
+                title="{% if not from_domain or s.status not in ['reviewed'] %}Domain cannot be changed here.{% else %}Change domain assignment{% endif %}"
               >
                 {# Put Untagged option first always for visibility #}
                 <option value="untagged"

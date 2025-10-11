@@ -1,5 +1,5 @@
 # ingestion/webcrawl/review_app.py
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, abort, render_template, request, jsonify, redirect
 import sqlite3
 import argparse
 import json
@@ -30,7 +30,12 @@ def index():
     cur = conn.cursor()
 
     # Total links
-    cur.execute("SELECT COUNT(*) FROM links")
+    cur.execute("""
+        SELECT COUNT(DISTINCT l.id)
+        FROM links l
+        JOIN staging_sentences s ON s.link_id = l.id
+        WHERE s.status = 'new'
+    """)
     total_links = cur.fetchone()[0] or 0
 
     # Sentence counts by status
@@ -50,7 +55,7 @@ def index():
         status_counts.setdefault(key, 0)
 
     cur.execute("""
-        SELECT COALESCE(d.name, 'Untagged') AS domain, COUNT(s.id)
+        SELECT COALESCE(d.name, 'Untagged') AS domain, COUNT(s.id), d.id
         FROM staging_sentences s
         LEFT JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
         LEFT JOIN domain d ON d.id = sd.domain_id
@@ -59,23 +64,24 @@ def index():
         ORDER BY COUNT(s.id) DESC
     """)
     domain_rows = cur.fetchall()
-    domain_counts = {row[0]: row[1] for row in domain_rows}
+    domain_counts = {row[0]: (row[1], row[2]) for row in domain_rows}
 
     if not domain_rows:
-        domain_counts = {"(no reviewed sentences yet)": 0}
+        domain_counts = {"(no reviewed sentences yet)": (0,0)}
 
     # Paginated links
     cur.execute(f"""
         SELECT l.id, l.url,
             COUNT(s.id) AS total,
-            SUM(CASE WHEN s.status='new' THEN 1 ELSE 0 END) AS new_count,
+            SUM(CASE WHEN s.status='new' THEN 1 ELSE 0 END) AS new,
             SUM(CASE WHEN s.status='reviewed' THEN 1 ELSE 0 END) AS reviewed,
             SUM(CASE WHEN s.status='rejected' THEN 1 ELSE 0 END) AS rejected,
             SUM(CASE WHEN s.status='duplicate' THEN 1 ELSE 0 END) AS duplicate
         FROM links l
         LEFT JOIN staging_sentences s ON s.link_id = l.id
         GROUP BY l.id, l.url
-        ORDER BY new_count DESC, l.id DESC
+        HAVING new > 0
+        ORDER BY new DESC, total DESC, l.id DESC
         LIMIT ? OFFSET ?
     """, (PAGE_SIZE, offset))
     rows = cur.fetchall()
@@ -334,6 +340,138 @@ def api_update_domain():
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "domain_id": did, "domain_name": domain_name})
+
+
+@app.route("/domain/<int:domain_id>")
+def view_domain(domain_id):
+    """
+    Show sentences associated with a domain (via staging_sentence_domain mapping).
+    Query params:
+      - page (int) default 1
+      - status (str) default 'reviewed' 
+      - page_size (int) default from config or PAGE_SIZE
+    Renders sentences.html (same view used for link-based review) and passes:
+      sentences, domain_name, domain_id, page, page_size, total, total_pages, start, end, status
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+
+        # params
+        try:
+            page = max(1, int(request.args.get("page", 1)))
+        except ValueError:
+            page = 1
+        status = request.args.get("status", "reviewed")
+        try:
+            page_size = int(request.args.get("page_size", PAGE_SIZE))
+            if page_size <= 0:
+                page_size = PAGE_SIZE
+        except Exception:
+            page_size = PAGE_SIZE
+
+        offset = (page - 1) * page_size
+
+        # validate domain exists
+        cur.execute("SELECT id, name FROM domain WHERE id = ?", (domain_id,))
+        drow = cur.fetchone()
+        if not drow:
+            conn.close()
+            return abort(404, f"Domain id {domain_id} not found")
+        domain_name = drow[1]
+
+        # total count for pagination (apply status filter if requested)
+        if status == "all":
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM staging_sentences s
+                JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+                WHERE sd.domain_id = ?
+            """, (domain_id,))
+        else:
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM staging_sentences s
+                JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+                WHERE sd.domain_id = ? AND s.status = ?
+            """, (domain_id, status))
+        total = cur.fetchone()[0] or 0
+        total_pages = (total + page_size - 1) // page_size if page_size else 1
+
+        # fetch sentences (with link info and domain info) ordered by insertion time then id
+        if status == "all":
+            q = """
+                SELECT s.id, s.sentence, COALESCE(s.status, 'new') as status,
+                       l.id AS link_id, l.url AS link_url,
+                       d.id AS domain_id, d.name AS domain_name,
+                       s.created_at
+                FROM staging_sentences s
+                JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+                LEFT JOIN links l ON l.id = s.link_id
+                LEFT JOIN domain d ON d.id = sd.domain_id
+                WHERE sd.domain_id = ?
+                ORDER BY s.created_at ASC, s.id ASC
+                LIMIT ? OFFSET ?
+            """
+            params = (domain_id, page_size, offset)
+        else:
+            q = """
+                SELECT s.id, s.sentence, COALESCE(s.status, 'new') as status,
+                       l.id AS link_id, l.url AS link_url,
+                       d.id AS domain_id, d.name AS domain_name,
+                       s.created_at
+                FROM staging_sentences s
+                JOIN staging_sentence_domain sd ON sd.sentence_id = s.id
+                LEFT JOIN links l ON l.id = s.link_id
+                LEFT JOIN domain d ON d.id = sd.domain_id
+                WHERE sd.domain_id = ? AND s.status = ?
+                ORDER BY s.created_at ASC, s.id ASC
+                LIMIT ? OFFSET ?
+            """
+            params = (domain_id, status, page_size, offset)
+
+        cur.execute(q, params)
+        rows = cur.fetchall()
+
+        sentences = []
+        for row in rows:
+            sid, text, st, link_id, link_url, did, dname, created_at = row
+            sentences.append({
+                "id": sid,
+                "sentence": text,
+                "status": st,
+                "link_id": link_id,
+                "link_url": link_url,
+                "domain_id": did,
+                "domain_name": dname,
+                "created_at": created_at
+            })
+
+        start = offset + 1 if total > 0 else 0
+        end = min(offset + page_size, total)
+
+        # Domain dropdown
+        cur.execute("SELECT id, name FROM domain ORDER BY name")
+        domain_options = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+
+        # Render the same review template, with a flag so the template can show domain-specific heading
+        return render_template(
+            "sentences.html",
+            sentences=sentences,
+            domain_name=domain_name,
+            domain_id=domain_id,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages,
+            start=start,
+            end=end,
+            status=status,
+            from_domain=True,
+            domain_options=domain_options
+        )
+    finally:
+        conn.close()
 
 
 # ==========================================================
