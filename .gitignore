@@ -18,3 +18,4 @@ crawl_configs/
 backups/
 crawl_configs/
 urls_discovered.txt
+ingestion/domain_rules/gu_domains_updated.json
