@@ -42,6 +42,23 @@
 </div>
 {% endif %}
 
+{% if not has_backlog %}
+  <div class="alert alert-success mt-4 text-center fs-5 py-4 shadow-sm border border-success-subtle bg-success-subtle">
+    🎉 Hoorah! No backlog to review — all caught up! 🎉
+  </div>
+{% else %}
+
+<nav class="mt-4">
+  <ul class="pagination justify-content-center">
+    {% if page > 1 %}
+      <li class="page-item"><a class="page-link" href="{{ url_for('index') }}?page={{ page-1 }}">Previous</a></li>
+    {% endif %}
+    <li class="page-item disabled"><span class="page-link">Page {{ page }} / {{ total_pages }}</span></li>
+    {% if page < total_pages %}
+      <li class="page-item"><a class="page-link" href="{{ url_for('index') }}?page={{ page+1 }}">Next</a></li>
+    {% endif %}
+  </ul>
+</nav>
 <p class="text-muted mt-4">Showing links {{ start }}–{{ end }} of {{ total_links }}, page {{ page }} / {{ total_pages }}</p>
 <div class="mt-4">
   <div class="table-responsive mt-3">
@@ -89,4 +106,5 @@
     {% endif %}
   </ul>
 </nav>
+{% endif %}
 {% endblock %}

@@ -37,6 +37,8 @@ def index():
         WHERE s.status = 'new'
     """)
     total_links = cur.fetchone()[0] or 0
+    has_backlog = total_links > 0
+
 
     # Sentence counts by status
     cur.execute("SELECT COUNT(*) FROM staging_sentences")
@@ -102,7 +104,8 @@ def index():
     return render_links_page(
         links, page, PAGE_SIZE, total_links,
         total_sentences, status_counts,
-        domain_counts=domain_counts
+        domain_counts=domain_counts,
+        has_backlog=has_backlog
     )
 
 
